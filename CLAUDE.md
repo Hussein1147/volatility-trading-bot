@@ -1,0 +1,3 @@
+- Project Status: Volatility trading bot development in progress
+- Dashboard Access: Local Streamlit dashboard, likely running on http://localhost:8501 
+- Current Work: Set up initial trading bot infrastructure, implementing volatility trading strategies
