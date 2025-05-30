@@ -1,0 +1,7 @@
+alpaca-py>=0.15.0
+anthropic>=0.7.0
+python-dotenv>=1.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+asyncio
+logging
