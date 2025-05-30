@@ -1,5 +1,6 @@
 # Environment variables
 .env
+.env.template
 .env.local
 .env.production
 
