@@ -1,165 +1,230 @@
 #!/bin/bash
 
-# AWS EC2 Deployment Script for Volatility Trading Bot
-# This script deploys the volatility trading bot to AWS EC2 without SSH key requirements
+# AWS Deployment Script for Volatility Trading Bot
+# This script deploys the bot to an EC2 instance with RDS PostgreSQL
 
-set -e  # Exit on any error
+set -e
 
-# Configuration variables
-INSTANCE_TYPE=${INSTANCE_TYPE:-"t3.micro"}
-AMI_ID=${AMI_ID:-"ami-0c02fb55956c7d316"}  # Amazon Linux 2 AMI (us-east-1)
+echo "🚀 Starting AWS deployment for Volatility Trading Bot"
+
+# Configuration
+REGION=${AWS_REGION:-us-east-1}
+INSTANCE_TYPE=${INSTANCE_TYPE:-t3.micro}
+KEY_PAIR_NAME=${KEY_PAIR_NAME:-volatility-bot-key}
 SECURITY_GROUP_NAME="volatility-bot-sg"
 INSTANCE_NAME="volatility-trading-bot"
+DB_INSTANCE_NAME="volatility-bot-db"
 
-echo "=== Volatility Trading Bot AWS Deployment ==="
-echo "Instance Type: $INSTANCE_TYPE"
-echo "AMI ID: $AMI_ID"
-echo ""
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# Check if AWS CLI is installed and configured
+print_status() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Check AWS CLI
 if ! command -v aws &> /dev/null; then
-    echo "Error: AWS CLI is not installed. Please install it first."
+    print_error "AWS CLI is not installed. Please install it first."
     exit 1
 fi
 
-# Check AWS credentials
+# Check if user is logged in to AWS
 if ! aws sts get-caller-identity &> /dev/null; then
-    echo "Error: AWS credentials not configured. Please run 'aws configure' first."
+    print_error "AWS credentials not configured. Run 'aws configure' first."
     exit 1
 fi
 
-echo "✓ AWS CLI configured successfully"
+print_status "AWS credentials verified"
 
-# Get default VPC ID
-VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query 'Vpcs[0].VpcId' --output text)
-if [ "$VPC_ID" = "None" ] || [ -z "$VPC_ID" ]; then
-    echo "Error: No default VPC found. Please create a VPC first."
-    exit 1
-fi
-echo "✓ Using VPC: $VPC_ID"
+# Create security group
+print_status "Creating security group..."
+aws ec2 create-security-group \
+    --group-name $SECURITY_GROUP_NAME \
+    --description "Security group for volatility trading bot" \
+    --region $REGION || print_warning "Security group may already exist"
 
-# Create security group if it doesn't exist
-SECURITY_GROUP_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=$SECURITY_GROUP_NAME" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
+# Add security group rules
+print_status "Configuring security group rules..."
+aws ec2 authorize-security-group-ingress \
+    --group-name $SECURITY_GROUP_NAME \
+    --protocol tcp \
+    --port 22 \
+    --cidr 0.0.0.0/0 \
+    --region $REGION || print_warning "SSH rule may already exist"
 
-if [ "$SECURITY_GROUP_ID" = "None" ] || [ -z "$SECURITY_GROUP_ID" ]; then
-    echo "Creating security group: $SECURITY_GROUP_NAME"
-    SECURITY_GROUP_ID=$(aws ec2 create-security-group \
-        --group-name "$SECURITY_GROUP_NAME" \
-        --description "Security group for volatility trading bot" \
-        --vpc-id "$VPC_ID" \
-        --query 'GroupId' \
-        --output text)
-    
-    # Add rules for HTTP/HTTPS (if needed for APIs)
-    aws ec2 authorize-security-group-egress \
-        --group-id "$SECURITY_GROUP_ID" \
-        --protocol tcp \
-        --port 80 \
-        --cidr 0.0.0.0/0 >/dev/null 2>&1 || true
-    
-    aws ec2 authorize-security-group-egress \
-        --group-id "$SECURITY_GROUP_ID" \
-        --protocol tcp \
-        --port 443 \
-        --cidr 0.0.0.0/0 >/dev/null 2>&1 || true
-    
-    echo "✓ Security group created: $SECURITY_GROUP_ID"
-else
-    echo "✓ Using existing security group: $SECURITY_GROUP_ID"
-fi
+aws ec2 authorize-security-group-ingress \
+    --group-name $SECURITY_GROUP_NAME \
+    --protocol tcp \
+    --port 8501 \
+    --cidr 0.0.0.0/0 \
+    --region $REGION || print_warning "Dashboard rule may already exist"
 
-# Create user data script for instance initialization
-USER_DATA=$(cat << 'EOF'
+aws ec2 authorize-security-group-ingress \
+    --group-name $SECURITY_GROUP_NAME \
+    --protocol tcp \
+    --port 8080 \
+    --cidr 0.0.0.0/0 \
+    --region $REGION || print_warning "Health check rule may already exist"
+
+# Create RDS subnet group
+print_status "Creating RDS subnet group..."
+aws rds create-db-subnet-group \
+    --db-subnet-group-name volatility-bot-subnet-group \
+    --db-subnet-group-description "Subnet group for volatility bot database" \
+    --subnet-ids $(aws ec2 describe-subnets --region $REGION --query 'Subnets[0:2].SubnetId' --output text) \
+    --region $REGION || print_warning "Subnet group may already exist"
+
+# Create RDS instance
+print_status "Creating RDS PostgreSQL instance (this may take 5-10 minutes)..."
+aws rds create-db-instance \
+    --db-instance-identifier $DB_INSTANCE_NAME \
+    --db-instance-class db.t3.micro \
+    --engine postgres \
+    --engine-version 15.4 \
+    --master-username botuser \
+    --master-user-password BotPassword123! \
+    --allocated-storage 20 \
+    --storage-type gp2 \
+    --db-name trading_bot \
+    --vpc-security-group-ids $(aws ec2 describe-security-groups --group-names $SECURITY_GROUP_NAME --region $REGION --query 'SecurityGroups[0].GroupId' --output text) \
+    --db-subnet-group-name volatility-bot-subnet-group \
+    --backup-retention-period 7 \
+    --storage-encrypted \
+    --region $REGION || print_warning "RDS instance may already exist"
+
+# Wait for RDS to be available
+print_status "Waiting for RDS instance to be available..."
+aws rds wait db-instance-available --db-instance-identifier $DB_INSTANCE_NAME --region $REGION
+
+# Get RDS endpoint
+RDS_ENDPOINT=$(aws rds describe-db-instances \
+    --db-instance-identifier $DB_INSTANCE_NAME \
+    --region $REGION \
+    --query 'DBInstances[0].Endpoint.Address' \
+    --output text)
+
+print_status "RDS endpoint: $RDS_ENDPOINT"
+
+# Create user data script
+cat > user-data.sh << EOF
 #!/bin/bash
 yum update -y
-yum install -y python3 python3-pip git
+yum install -y docker git
 
-# Create application directory
-mkdir -p /opt/volatility-bot
-cd /opt/volatility-bot
+# Start Docker
+systemctl start docker
+systemctl enable docker
+usermod -a -G docker ec2-user
 
-# Create a simple systemd service for the bot
-cat > /etc/systemd/system/volatility-bot.service << 'EOL'
-[Unit]
-Description=Volatility Trading Bot
-After=network.target
+# Install Docker Compose
+curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose
+chmod +x /usr/local/bin/docker-compose
 
-[Service]
-Type=simple
-User=ec2-user
-WorkingDirectory=/opt/volatility-bot
-ExecStart=/usr/bin/python3 /opt/volatility-bot/volatility_bot.py
-Restart=always
-RestartSec=10
+# Clone repository
+cd /home/ec2-user
+git clone https://github.com/Hussein1147/volatility-trading-bot.git
+cd volatility-trading-bot
 
-[Install]
-WantedBy=multi-user.target
-EOL
+# Create .env file
+cat > .env << ENVEOF
+ALPACA_API_KEY=${ALPACA_API_KEY}
+ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+DATABASE_URL=postgresql://botuser:BotPassword123!@${RDS_ENDPOINT}:5432/trading_bot
+ENVIRONMENT=production
+ENVEOF
 
-# Enable the service (will start after code is deployed)
-systemctl enable volatility-bot
+# Create production docker-compose file
+cat > docker-compose.prod.yml << PRODEOF
+version: '3.8'
 
-# Install CloudWatch agent for monitoring (optional)
-yum install -y amazon-cloudwatch-agent
+services:
+  trading-bot:
+    build: .
+    environment:
+      - ALPACA_API_KEY=\${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=\${ALPACA_SECRET_KEY}
+      - ANTHROPIC_API_KEY=\${ANTHROPIC_API_KEY}
+      - DATABASE_URL=\${DATABASE_URL}
+      - ENVIRONMENT=production
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    command: python enhanced_volatility_bot.py
 
-echo "Instance initialization completed" > /var/log/volatility-bot-init.log
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    environment:
+      - DATABASE_URL=\${DATABASE_URL}
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+volumes:
+  logs:
+PRODEOF
+
+# Set permissions
+chown -R ec2-user:ec2-user /home/ec2-user/volatility-trading-bot
+
+# Start services
+cd /home/ec2-user/volatility-trading-bot
+docker-compose -f docker-compose.prod.yml up -d
 EOF
-)
 
-echo "Launching EC2 instance..."
-
-# Launch EC2 instance without SSH key
+# Launch EC2 instance
+print_status "Launching EC2 instance..."
 INSTANCE_ID=$(aws ec2 run-instances \
-    --image-id "$AMI_ID" \
+    --image-id ami-0c02fb55956c7d316 \
     --count 1 \
-    --instance-type "$INSTANCE_TYPE" \
-    --security-group-ids "$SECURITY_GROUP_ID" \
-    --user-data "$USER_DATA" \
+    --instance-type $INSTANCE_TYPE \
+    --key-name $KEY_PAIR_NAME \
+    --security-groups $SECURITY_GROUP_NAME \
+    --user-data file://user-data.sh \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}]" \
+    --region $REGION \
     --query 'Instances[0].InstanceId' \
     --output text)
 
-if [ -z "$INSTANCE_ID" ]; then
-    echo "Error: Failed to launch EC2 instance"
-    exit 1
-fi
-
-echo "✓ EC2 instance launched: $INSTANCE_ID"
-echo "Waiting for instance to be in running state..."
+print_status "EC2 instance created: $INSTANCE_ID"
 
 # Wait for instance to be running
-aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+print_status "Waiting for instance to be running..."
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $REGION
 
-# Get instance details
-INSTANCE_INFO=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0]')
-PUBLIC_IP=$(echo "$INSTANCE_INFO" | jq -r '.PublicIpAddress // "N/A"')
-PRIVATE_IP=$(echo "$INSTANCE_INFO" | jq -r '.PrivateIpAddress // "N/A"')
-AVAILABILITY_ZONE=$(echo "$INSTANCE_INFO" | jq -r '.Placement.AvailabilityZone // "N/A"')
+# Get public IP
+PUBLIC_IP=$(aws ec2 describe-instances \
+    --instance-ids $INSTANCE_ID \
+    --region $REGION \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' \
+    --output text)
 
+# Cleanup
+rm -f user-data.sh
+
+print_status "🎉 Deployment completed successfully!"
 echo ""
-echo "=== Deployment Successful ==="
 echo "Instance ID: $INSTANCE_ID"
-echo "Instance Type: $INSTANCE_TYPE"
 echo "Public IP: $PUBLIC_IP"
-echo "Private IP: $PRIVATE_IP"
-echo "Availability Zone: $AVAILABILITY_ZONE"
-echo "Security Group: $SECURITY_GROUP_ID"
+echo "RDS Endpoint: $RDS_ENDPOINT"
 echo ""
-echo "=== Next Steps ==="
-echo "1. The instance is now running and will automatically install dependencies"
-echo "2. Deploy your volatility bot code using AWS Systems Manager Session Manager or CodeDeploy"
-echo "3. Monitor the instance using CloudWatch or AWS Systems Manager"
-echo "4. To connect without SSH, use: aws ssm start-session --target $INSTANCE_ID"
+echo "📊 Dashboard URL: http://$PUBLIC_IP:8501"
+echo "🔍 Health Check: http://$PUBLIC_IP:8080/health"
 echo ""
-echo "=== Instance Management ==="
-echo "To stop the instance:"
-echo "  aws ec2 stop-instances --instance-ids $INSTANCE_ID"
+echo "📝 SSH Access: ssh -i ~/.ssh/${KEY_PAIR_NAME}.pem ec2-user@$PUBLIC_IP"
 echo ""
-echo "To terminate the instance:"
-echo "  aws ec2 terminate-instances --instance-ids $INSTANCE_ID"
-echo ""
-echo "To check instance status:"
-echo "  aws ec2 describe-instances --instance-ids $INSTANCE_ID"
-echo ""
-echo "Note: This instance was launched without SSH keys for enhanced security."
-echo "Use AWS Systems Manager Session Manager for secure access if needed."
+print_warning "Please wait 5-10 minutes for the services to fully start up."
+print_status "You can monitor the logs with: ssh -i ~/.ssh/${KEY_PAIR_NAME}.pem ec2-user@$PUBLIC_IP 'cd volatility-trading-bot && docker-compose logs -f'"
