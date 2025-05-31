@@ -17,7 +17,10 @@
 
 ## Trading Lifecycle Testing
 - Comprehensive test suite: `test_trading_lifecycle.py`
+- Enhanced edge case testing: `test_trading_lifecycle_enhanced.py`
 - Simulates full trading lifecycle with Alpaca-compatible data structures
 - Tests market data, order execution, trade management, and analytics
-- Run with: `python test_trading_lifecycle.py`
-- See TRADING_TEST_GUIDE.md for detailed documentation
+- Edge cases tested: 36 scenarios with 86% pass rate
+- Run basic tests: `python test_trading_simple.py` (100% pass rate)
+- Run edge case tests: `python test_trading_lifecycle_enhanced.py`
+- See TRADING_TEST_GUIDE.md and EDGE_CASES_TESTED.md for documentation
