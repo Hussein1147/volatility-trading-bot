@@ -14,3 +14,10 @@
 - Simplified 3-tab interface: Dashboard, Trades, Settings
 - All bot functionality preserved with clean, maintainable code
 - Testing suite ensures dashboard is actually live and accessible before claiming success
+
+## Testing
+- Dashboard tests: `python launch_dashboard.py` (includes verification)
+- Trading tests: `python test_trading_comprehensive.py` (100% pass rate)
+- All tests consolidated for simplicity
+- Edge cases fully covered including flash crashes, circuit breakers, etc.
+- See TESTING_GUIDE.md for complete documentation
