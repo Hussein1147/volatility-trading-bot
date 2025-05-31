@@ -77,6 +77,10 @@ class Trade:
     probability_profit: float
     confidence_score: int
     claude_reasoning: str
+    # Exit tracking fields
+    exit_time: Optional[datetime] = None
+    realized_pnl: float = 0.0
+    exit_reason: Optional[str] = None
 
 class EnhancedTradeManager:
     def __init__(self):
@@ -104,6 +108,7 @@ class EnhancedTradeManager:
         # Trade management
         self.rules = TradeManagementRules()
         self.active_trades: List[Trade] = []
+        self.closed_trades: List[Trade] = []
         self.daily_pnl = 0
         self.account_balance = 100000
         
@@ -267,6 +272,9 @@ class EnhancedTradeManager:
         try:
             logger.info(f"Closing trade {trade.trade_id}: {reason}")
             
+            # Set exit reason
+            trade.exit_reason = reason
+            
             # For credit spreads, we need to BUY BACK the spread to close
             # This means: BUY the short leg, SELL the long leg
             
@@ -325,16 +333,21 @@ class EnhancedTradeManager:
             
             if all_filled:
                 # All orders filled - trade is closed
-                trade.status = "CLOSED"
+                trade.status = "closed"
+                trade.exit_time = datetime.now()
                 
                 # Calculate final P&L
                 current_value, final_pnl = await self.calculate_current_trade_value(trade)
-                trade.unrealized_pnl = final_pnl
+                trade.realized_pnl = final_pnl
+                trade.unrealized_pnl = 0  # No longer unrealized
                 
                 logger.info(f"Trade {trade.trade_id} successfully closed. Final P&L: ${final_pnl:.2f}")
                 
                 # Update daily P&L
                 self.daily_pnl += final_pnl
+                
+                # Move to closed trades
+                self.closed_trades.append(trade)
                 
                 # Remove from active trades
                 self.active_trades = [t for t in self.active_trades if t.trade_id != trade.trade_id]
@@ -346,8 +359,12 @@ class EnhancedTradeManager:
         logger.warning(f"Trade {trade.trade_id} closure timed out")
         return False
     
-    async def check_exit_conditions(self, trade: Trade) -> Optional[str]:
-        """Check if trade should be closed based on strategy rules"""
+    async def check_exit_conditions(self, trade: Trade) -> Tuple[bool, str]:
+        """Check if trade should be closed based on strategy rules
+        
+        Returns:
+            Tuple[bool, str]: (should_close, reason)
+        """
         
         # Update current trade value
         current_value, unrealized_pnl = await self.calculate_current_trade_value(trade)
@@ -360,22 +377,22 @@ class EnhancedTradeManager:
         
         # Check profit target (35% of max profit)
         if unrealized_pnl >= trade.profit_target:
-            return f"PROFIT_TARGET: ${unrealized_pnl:.2f} >= ${trade.profit_target:.2f}"
+            return True, f"PROFIT_TARGET: ${unrealized_pnl:.2f} >= ${trade.profit_target:.2f}"
         
         # Check stop loss (75% of max loss)
         max_loss_threshold = trade.max_loss * self.rules.stop_loss_percent
         if unrealized_pnl <= -max_loss_threshold:
-            return f"STOP_LOSS: ${unrealized_pnl:.2f} <= ${-max_loss_threshold:.2f}"
+            return True, f"STOP_LOSS: ${unrealized_pnl:.2f} <= ${-max_loss_threshold:.2f}"
         
         # Check time stop (close at 5 DTE)
         if trade.days_to_expiration <= self.rules.time_stop_dte:
-            return f"TIME_STOP: {trade.days_to_expiration} DTE <= {self.rules.time_stop_dte}"
+            return True, f"TIME_STOP: {trade.days_to_expiration} DTE <= {self.rules.time_stop_dte}"
         
         # Check daily loss limit
         if self.daily_pnl <= -self.rules.max_daily_loss:
-            return f"DAILY_LOSS_LIMIT: ${self.daily_pnl:.2f} <= ${-self.rules.max_daily_loss:.2f}"
+            return True, f"DAILY_LOSS_LIMIT: ${self.daily_pnl:.2f} <= ${-self.rules.max_daily_loss:.2f}"
         
-        return None
+        return False, "No exit conditions met"
     
     async def monitor_all_trades(self):
         """Monitor all active trades and execute closures"""
@@ -386,9 +403,9 @@ class EnhancedTradeManager:
         
         for trade in self.active_trades.copy():  # Use copy to avoid modification during iteration
             try:
-                exit_reason = await self.check_exit_conditions(trade)
+                should_close, exit_reason = await self.check_exit_conditions(trade)
                 
-                if exit_reason:
+                if should_close:
                     logger.info(f"Exit condition met for trade {trade.trade_id}: {exit_reason}")
                     
                     # Execute trade closure
@@ -453,7 +470,7 @@ class EnhancedTradeManager:
             max_loss=trade_data['max_loss'],
             current_value=trade_data['entry_credit'],
             unrealized_pnl=0,
-            status="OPEN",
+            status="active",
             profit_target=trade_data['entry_credit'] * self.rules.profit_target_percent,
             stop_loss_target=trade_data['max_loss'] * self.rules.stop_loss_percent,
             days_to_expiration=trade_data.get('days_to_expiration', 14),
@@ -473,27 +490,63 @@ class EnhancedTradeManager:
     
     def get_trade_summary(self) -> Dict[str, Any]:
         """Get summary of all trades and performance"""
-        if not self.active_trades:
+        # Separate active and closed trades
+        active_trades = [t for t in self.active_trades if t.status != "closed"]
+        closed_trades = getattr(self, 'closed_trades', [])
+        
+        # If no trades at all
+        if not active_trades and not closed_trades:
             return {
                 "total_trades": 0,
                 "open_trades": 0,
+                "closed_trades": 0,
                 "total_credit": 0,
                 "total_risk": 0,
                 "unrealized_pnl": 0,
-                "daily_pnl": self.daily_pnl
+                "realized_pnl": 0,
+                "total_pnl": 0,
+                "daily_pnl": self.daily_pnl,
+                "win_rate": 0,
+                "average_win": 0,
+                "average_loss": 0,
+                "profit_factor": 0,
+                "monitoring_active": self.is_monitoring,
+                "last_check": self.last_check_time
             }
         
-        total_credit = sum(t.entry_credit for t in self.active_trades)
-        total_risk = sum(t.max_loss for t in self.active_trades)
-        unrealized_pnl = sum(t.unrealized_pnl for t in self.active_trades)
+        # Calculate metrics for active trades
+        total_credit = sum(t.entry_credit for t in active_trades) if active_trades else 0
+        total_risk = sum(t.max_loss for t in active_trades) if active_trades else 0
+        unrealized_pnl = sum(t.unrealized_pnl for t in active_trades) if active_trades else 0
+        
+        # Calculate metrics for closed trades
+        realized_pnl = sum(t.realized_pnl for t in closed_trades) if closed_trades else 0
+        wins = [t for t in closed_trades if t.realized_pnl > 0]
+        losses = [t for t in closed_trades if t.realized_pnl < 0]
+        
+        win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0
+        average_win = (sum(t.realized_pnl for t in wins) / len(wins)) if wins else 0
+        average_loss = (sum(t.realized_pnl for t in losses) / len(losses)) if losses else 0
+        
+        # Calculate profit factor
+        total_wins = sum(t.realized_pnl for t in wins) if wins else 0
+        total_losses = abs(sum(t.realized_pnl for t in losses)) if losses else 0
+        profit_factor = (total_wins / total_losses) if total_losses > 0 else 0
         
         return {
-            "total_trades": len(self.active_trades),
-            "open_trades": len([t for t in self.active_trades if t.status == "OPEN"]),
+            "total_trades": len(active_trades) + len(closed_trades),
+            "open_trades": len(active_trades),
+            "closed_trades": len(closed_trades),
             "total_credit": total_credit,
             "total_risk": total_risk,
             "unrealized_pnl": unrealized_pnl,
+            "realized_pnl": realized_pnl,
+            "total_pnl": unrealized_pnl + realized_pnl,
             "daily_pnl": self.daily_pnl,
+            "win_rate": round(win_rate, 1),
+            "average_win": round(average_win, 2),
+            "average_loss": round(average_loss, 2),
+            "profit_factor": round(profit_factor, 2),
             "monitoring_active": self.is_monitoring,
             "last_check": self.last_check_time
         }
