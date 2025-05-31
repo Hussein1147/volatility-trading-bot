@@ -174,10 +174,13 @@ class FullAutomatedBot:
     def __init__(self):
         self.trade_manager = EnhancedTradeManager()
         self.is_running = False
-        self.symbols = ['SPY', 'QQQ', 'IWM', 'DIA']
-        self.min_price_move = 1.5  # 1.5% minimum move
-        self.min_iv_rank = 70  # Minimum IV rank
-        self.scan_interval = 300  # 5 minutes
+        # Use settings from session state if available
+        settings = getattr(st.session_state, 'bot_settings', {})
+        self.symbols = settings.get('symbols', ['SPY', 'QQQ', 'IWM', 'DIA'])
+        self.min_price_move = settings.get('min_price_move', 1.5)  # 1.5% minimum move
+        self.min_iv_rank = settings.get('min_iv_rank', 70)  # Minimum IV rank
+        self.scan_interval = settings.get('scan_interval', 300)  # 5 minutes
+        self.confidence_threshold = settings.get('confidence_threshold', 70)
         self.last_scan_time = None
         
     def log(self, message):
@@ -427,7 +430,7 @@ class FullAutomatedBot:
                     analysis = await self.analyze_with_claude(market_data)
                     
                     # Determine bot decision
-                    if analysis and analysis.get('should_trade') and analysis.get('confidence', 0) >= 70:
+                    if analysis and analysis.get('should_trade') and analysis.get('confidence', 0) >= self.confidence_threshold:
                         decision = f"EXECUTE TRADE - Confidence: {analysis.get('confidence')}%"
                         
                         # Execute trade
@@ -632,68 +635,17 @@ def main():
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Sidebar Controls
-    st.sidebar.title("🎛️ Trade Management Controls")
-    
-    # Trade Management Rules
-    st.sidebar.subheader("📋 Management Rules")
-    
-    tm = st.session_state.trade_manager
-    rules = tm.rules
-    
-    # Customizable rules
-    new_profit_target = st.sidebar.slider(
-        "Profit Target %", 0.2, 0.8, rules.profit_target_percent, 0.05,
-        help="Close trades at X% of maximum profit"
-    )
-    
-    new_stop_loss = st.sidebar.slider(
-        "Stop Loss %", 0.5, 1.0, rules.stop_loss_percent, 0.05,
-        help="Close trades at X% of maximum loss"
-    )
-    
-    new_time_stop = st.sidebar.slider(
-        "Time Stop (DTE)", 1, 10, rules.time_stop_dte, 1,
-        help="Close all trades at X days to expiration"
-    )
-    
-    new_interval = st.sidebar.slider(
-        "Check Interval (seconds)", 30, 300, rules.monitoring_interval, 30,
-        help="How often to check trade conditions"
-    )
-    
-    new_daily_loss = st.sidebar.slider(
-        "Max Daily Loss $", 100, 1000, int(rules.max_daily_loss), 50,
-        help="Stop all trading if daily loss exceeds this"
-    )
-    
-    # Update rules if changed
-    rules.profit_target_percent = new_profit_target
-    rules.stop_loss_percent = new_stop_loss
-    rules.time_stop_dte = new_time_stop
-    rules.monitoring_interval = new_interval
-    rules.max_daily_loss = float(new_daily_loss)
-    
-    # Monitoring Controls
-    st.sidebar.subheader("🔍 Monitoring")
-    
-    if st.sidebar.button("▶️ Start Monitoring", disabled=st.session_state.monitoring_active):
-        if start_monitoring():
-            st.sidebar.success("✅ Monitoring started in background!")
-            st.rerun()
-    
-    if st.sidebar.button("⏹️ Stop Monitoring", disabled=not st.session_state.monitoring_active):
-        stop_monitoring()
-        st.sidebar.success("⏹️ Monitoring stopped!")
-        st.rerun()
-    
-    if st.sidebar.button("🔄 Manual Check"):
-        with st.spinner("Checking all trades..."):
-            try:
-                asyncio.run(tm.monitor_all_trades())
-                st.sidebar.success("✅ Manual check complete!")
-            except Exception as e:
-                st.sidebar.error(f"Error: {e}")
+    # Initialize bot settings in session state if not present
+    if 'bot_settings' not in st.session_state:
+        st.session_state.bot_settings = {
+            'symbols': ['SPY', 'QQQ', 'IWM', 'DIA'],
+            'min_price_move': 1.5,
+            'min_iv_rank': 70,
+            'scan_interval': 300,
+            'confidence_threshold': 70,
+            'max_contracts': 5,
+            'account_balance': 100000
+        }
     
     # Control Panel
     control_container = st.container()
@@ -751,7 +703,7 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
     
     # Main content area with tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Dashboard", "🤖 AI Analysis", "📊 Active Trades", "🔍 Market Scanner", "⚙️ Settings"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Dashboard", "🤖 AI Analysis", "📊 Active Trades", "🔍 Market Scanner", "📝 Trade Entry", "⚙️ Settings"])
     
     with tab1:
         # Dashboard Overview
@@ -760,9 +712,10 @@ def main():
         # Calculate additional metrics
         tm = st.session_state.trade_manager
         win_rate = 0
-        if tm.closed_trades:
-            wins = sum(1 for t in tm.closed_trades if t.realized_pnl > 0)
-            win_rate = (wins / len(tm.closed_trades)) * 100
+        closed_trades = getattr(tm, 'closed_trades', [])
+        if closed_trades:
+            wins = sum(1 for t in closed_trades if t.realized_pnl > 0)
+            win_rate = (wins / len(closed_trades)) * 100
         
         with metrics_cols[0]:
             st.markdown("""
@@ -792,16 +745,18 @@ def main():
             """, unsafe_allow_html=True)
         
         with metrics_cols[3]:
-            total_volume = summary['open_trades'] + len(tm.closed_trades)
+            closed_trades_count = len(getattr(tm, 'closed_trades', []))
+            total_volume = summary['open_trades'] + closed_trades_count
             st.markdown(f"""
             <div style='background: #1a1a1a; padding: 20px; border-radius: 10px; text-align: center;'>
                 <div style='font-size: 0.9em; color: #888; margin-bottom: 5px;'>TOTAL TRADES</div>
                 <div style='font-size: 2em; font-weight: bold; color: #17a2b8;'>{total_volume}</div>
             </div>
             """, unsafe_allow_html=True)
-    
+        
         # Performance Chart
-        if tm.active_trades or tm.closed_trades:
+        closed_trades = getattr(tm, 'closed_trades', [])
+        if tm.active_trades or closed_trades:
             st.markdown("<br>", unsafe_allow_html=True)
             st.subheader("📈 Performance Overview")
             
@@ -811,7 +766,7 @@ def main():
             current_total = 0
             
             # Add closed trades
-            for trade in sorted(tm.closed_trades, key=lambda x: x.exit_time if hasattr(x, 'exit_time') else x.entry_time):
+            for trade in sorted(closed_trades, key=lambda x: x.exit_time if hasattr(x, 'exit_time') else x.entry_time):
                 if hasattr(trade, 'exit_time'):
                     dates.append(trade.exit_time)
                     current_total += trade.realized_pnl
@@ -855,78 +810,25 @@ def main():
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
+        
+        # Bot Activity Logs
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.expander("📋 Activity Logs", expanded=False):
+            if st.session_state.bot_logs:
+                # Show logs in reverse order (newest first)
+                log_text = "\\n".join(reversed(st.session_state.bot_logs[-20:]))  # Last 20 logs
+                st.text_area("Bot Logs", value=log_text, height=300, label_visibility="collapsed")
+            else:
+                st.info("No bot activity yet. Start the bot to see live logs.")
     
-    # Trade Entry Simulation
-    st.subheader("📝 Add New Trade (Manual Entry)")
-    st.info("💡 Add trades to test the automated monitoring system")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        entry_symbol = st.selectbox("Symbol", ["SPY", "QQQ", "IWM", "DIA"], key="entry")
-        entry_spread_type = st.selectbox("Spread Type", ["Call Credit", "Put Credit"])
-        entry_contracts = st.number_input("Contracts", 1, 10, 2)
-    
-    with col2:
-        entry_short_strike = st.number_input("Short Strike", value=450.0, step=1.0)
-        entry_long_strike = st.number_input("Long Strike", value=455.0, step=1.0)
-        entry_expiration = st.date_input("Expiration", value=datetime.now().date() + timedelta(days=14), key="entry_exp")
-    
-    with col3:
-        entry_credit = st.number_input("Credit Received", value=125.0, step=5.0)
-        entry_max_loss = st.number_input("Max Loss", value=375.0, step=25.0)
-        entry_prob_profit = st.slider("Probability of Profit %", 50, 90, 75)
-    
-    if st.button("➕ Add Trade to Monitoring"):
-        try:
-            # Create option contracts
-            short_leg = OptionContract(
-                symbol=f"{entry_symbol}_{datetime.now().strftime('%y%m%d')}C{int(entry_short_strike):08d}",
-                strike_price=entry_short_strike,
-                expiration_date=entry_expiration.strftime('%Y-%m-%d'),
-                option_type="call" if "Call" in entry_spread_type else "put",
-                bid_price=2.5, ask_price=2.6, volume=100, open_interest=500,
-                delta=0.3, gamma=0.1, theta=-0.05, vega=0.2, implied_volatility=0.25
-            )
-            
-            long_leg = OptionContract(
-                symbol=f"{entry_symbol}_{datetime.now().strftime('%y%m%d')}C{int(entry_long_strike):08d}",
-                strike_price=entry_long_strike,
-                expiration_date=entry_expiration.strftime('%Y-%m-%d'),
-                option_type="call" if "Call" in entry_spread_type else "put",
-                bid_price=1.2, ask_price=1.3, volume=80, open_interest=300,
-                delta=0.2, gamma=0.08, theta=-0.03, vega=0.15, implied_volatility=0.22
-            )
-            
-            trade_data = {
-                'symbol': entry_symbol,
-                'strategy_type': 'credit_spread',
-                'spread_type': entry_spread_type.lower().replace(' ', '_'),
-                'short_leg': short_leg,
-                'long_leg': long_leg,
-                'contracts': entry_contracts,
-                'entry_credit': entry_credit,
-                'max_loss': entry_max_loss,
-                'probability_profit': entry_prob_profit,
-                'confidence_score': 80,
-                'claude_reasoning': f"Manual {entry_spread_type} spread on {entry_symbol}"
-            }
-            
-            trade = asyncio.run(tm.add_trade(trade_data))
-            st.success(f"✅ Added trade {trade.trade_id} to monitoring!")
-            st.info(f"📊 Profit target: ${trade.profit_target:.2f} | Stop loss: ${trade.stop_loss_target:.2f}")
-            st.rerun()
-            
-        except Exception as e:
-            st.error(f"❌ Error adding trade: {e}")
-    
-    # Analysis Tabs
-    st.subheader("🤖 Bot Intelligence & Analysis")
-    
-    tab1, tab2, tab3 = st.tabs(["🧠 Claude Analysis", "📊 Market Scans", "📋 Activity Logs"])
-    
-    with tab1:
-        st.markdown("**Real-time AI Analysis from Claude 4**")
+    with tab2:
+        # AI Analysis Tab
+        st.markdown("""
+        <div style='text-align: center; padding: 20px;'>
+            <h2 style='color: #00c805;'>🤖 AI Trading Intelligence</h2>
+            <p style='color: #888;'>Real-time market analysis powered by Claude 4</p>
+        </div>
+        """, unsafe_allow_html=True)
         
         if st.session_state.bot_analysis:
             for i, analysis in enumerate(reversed(st.session_state.bot_analysis[-5:])):
@@ -955,7 +857,7 @@ def main():
                         with col1:
                             st.metric("Confidence", f"{claude.get('confidence', 0)}%")
                         with col2:
-                            st.metric("Action", claude.get('recommended_action', 'N/A'))
+                            st.metric("Action", claude.get('spread_type', 'N/A').replace('_', ' ').title() if claude.get('should_trade') else 'No Trade')
                         with col3:
                             if claude.get('should_trade'):
                                 st.metric("Trade", "✅ YES")
@@ -978,8 +880,94 @@ def main():
         else:
             st.info("🔍 No Claude analyses yet. Start the bot to see AI decision-making in real-time!")
     
-    with tab2:
-        st.markdown("**Market Scanning Results**")
+    with tab3:
+        # Active Trades Tab
+        st.markdown("""
+        <div style='text-align: center; padding: 20px;'>
+            <h2 style='color: #00c805;'>📊 Active Positions</h2>
+            <p style='color: #888;'>Real-time monitoring of all open trades</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if tm.active_trades:
+            trades_data = []
+            
+            for trade in tm.active_trades:
+                # Calculate current status
+                exp_date = datetime.strptime(trade.short_leg.expiration_date, '%Y-%m-%d')
+                dte = (exp_date.date() - datetime.now().date()).days
+                
+                # Color coding for status
+                status_color = "🟢" if trade.status == "OPEN" else "🟡" if trade.status == "CLOSING" else "🔴"
+                
+                trades_data.append({
+                    'ID': trade.trade_id.split('_')[-1][:8],  # Shortened ID
+                    'Symbol': trade.symbol,
+                    'Type': trade.spread_type.replace('_', ' ').title(),
+                    'Short': f"${trade.short_leg.strike_price:.0f}",
+                    'Long': f"${trade.long_leg.strike_price:.0f}",
+                    'Contracts': trade.contracts,
+                    'Entry Credit': f"${trade.entry_credit:.2f}",
+                    'Current P&L': f"${trade.unrealized_pnl:.2f}",
+                    'Target': f"${trade.profit_target:.2f}",
+                    'Stop': f"${-trade.stop_loss_target:.2f}",
+                    'DTE': dte,
+                    'Status': f"{status_color} {trade.status}",
+                    'Entry': trade.entry_time.strftime('%m-%d %H:%M')
+                })
+            
+            df = pd.DataFrame(trades_data)
+            
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            
+            # Quick Stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                total_credit = sum(t.entry_credit for t in tm.active_trades)
+                st.metric("Total Credit Collected", f"${total_credit:.2f}")
+            with col2:
+                total_pnl = sum(t.unrealized_pnl for t in tm.active_trades)
+                st.metric("Total Unrealized P&L", f"${total_pnl:.2f}")
+            with col3:
+                avg_dte = sum((datetime.strptime(t.short_leg.expiration_date, '%Y-%m-%d').date() - datetime.now().date()).days for t in tm.active_trades) / len(tm.active_trades)
+                st.metric("Average DTE", f"{avg_dte:.1f} days")
+            
+            # Trade Performance Chart
+            if len(trades_data) > 1:
+                st.subheader("📈 Trade Performance Chart")
+                
+                pnl_data = [t.unrealized_pnl for t in tm.active_trades]
+                symbols = [t.symbol for t in tm.active_trades]
+                
+                fig = px.bar(
+                    x=symbols,
+                    y=pnl_data,
+                    title="Current P&L by Trade",
+                    labels={'x': 'Symbol', 'y': 'P&L ($)'},
+                    color=pnl_data,
+                    color_continuous_scale=['red', 'white', 'green']
+                )
+                
+                fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                fig.update_layout(
+                    template="plotly_dark",
+                    plot_bgcolor='#1a1a1a',
+                    paper_bgcolor='#1a1a1a',
+                    font=dict(color='#ffffff')
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        
+        else:
+            st.info("📭 No active trades. Start the bot or add a trade manually to begin.")
+    
+    with tab4:
+        # Market Scanner Tab
+        st.markdown("""
+        <div style='text-align: center; padding: 20px;'>
+            <h2 style='color: #00c805;'>🔍 Market Scanner</h2>
+            <p style='color: #888;'>Real-time volatility and opportunity detection</p>
+        </div>
+        """, unsafe_allow_html=True)
         
         if st.session_state.market_scans:
             latest_scan = st.session_state.market_scans[-1]
@@ -1003,148 +991,317 @@ def main():
         else:
             st.info("📊 No market scans yet. Bot will scan every 5 minutes during market hours.")
     
-    with tab3:
-        st.markdown("**Real-time Bot Activity**")
+    with tab5:
+        # Trade Entry Tab
+        st.markdown("""
+        <div style='text-align: center; padding: 20px;'>
+            <h2 style='color: #00c805;'>📝 Manual Trade Entry</h2>
+            <p style='color: #888;'>Add trades manually to test the monitoring system</p>
+        </div>
+        """, unsafe_allow_html=True)
         
-        if st.session_state.bot_logs:
-            # Show logs in reverse order (newest first)
-            log_text = "\\n".join(reversed(st.session_state.bot_logs[-20:]))  # Last 20 logs
-            st.text_area("Bot Logs", value=log_text, height=300)
-        else:
-            st.info("No bot activity yet. Start the bot to see live logs.")
-    
-    # Active Trades Table
-    st.subheader("📊 Active Trades with Real-Time Monitoring")
-    
-    if tm.active_trades:
-        trades_data = []
-        
-        for trade in tm.active_trades:
-            # Calculate current status
-            exp_date = datetime.strptime(trade.short_leg.expiration_date, '%Y-%m-%d')
-            dte = (exp_date.date() - datetime.now().date()).days
-            
-            # Color coding for status
-            status_color = "🟢" if trade.status == "OPEN" else "🟡" if trade.status == "CLOSING" else "🔴"
-            
-            trades_data.append({
-                'ID': trade.trade_id.split('_')[-1][:8],  # Shortened ID
-                'Symbol': trade.symbol,
-                'Type': trade.spread_type.replace('_', ' ').title(),
-                'Short': f"${trade.short_leg.strike_price:.0f}",
-                'Long': f"${trade.long_leg.strike_price:.0f}",
-                'Contracts': trade.contracts,
-                'Entry Credit': f"${trade.entry_credit:.2f}",
-                'Current P&L': f"${trade.unrealized_pnl:.2f}",
-                'Target': f"${trade.profit_target:.2f}",
-                'Stop': f"${-trade.stop_loss_target:.2f}",
-                'DTE': dte,
-                'Status': f"{status_color} {trade.status}",
-                'Entry': trade.entry_time.strftime('%m-%d %H:%M')
-            })
-        
-        df = pd.DataFrame(trades_data)
-        
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        
-        # Quick Stats
         col1, col2, col3 = st.columns(3)
-        with col1:
-            total_credit = sum(t.entry_credit for t in tm.active_trades)
-            st.metric("Total Credit Collected", f"${total_credit:.2f}")
-        with col2:
-            total_pnl = sum(t.unrealized_pnl for t in tm.active_trades)
-            st.metric("Total Unrealized P&L", f"${total_pnl:.2f}")
-        with col3:
-            avg_dte = sum((datetime.strptime(t.short_leg.expiration_date, '%Y-%m-%d').date() - datetime.now().date()).days for t in tm.active_trades) / len(tm.active_trades)
-            st.metric("Average DTE", f"{avg_dte:.1f} days")
         
-        # Trade Performance Chart
-        if len(trades_data) > 1:
-            st.subheader("📈 Trade Performance Chart")
+        with col1:
+            entry_symbol = st.selectbox("Symbol", ["SPY", "QQQ", "IWM", "DIA"], key="entry")
+            entry_spread_type = st.selectbox("Spread Type", ["Call Credit", "Put Credit"])
+            entry_contracts = st.number_input("Contracts", 1, 10, 2)
+        
+        with col2:
+            entry_short_strike = st.number_input("Short Strike", value=450.0, step=1.0)
+            entry_long_strike = st.number_input("Long Strike", value=455.0, step=1.0)
+            entry_expiration = st.date_input("Expiration", value=datetime.now().date() + timedelta(days=14), key="entry_exp")
+        
+        with col3:
+            entry_credit = st.number_input("Credit Received", value=125.0, step=5.0)
+            entry_max_loss = st.number_input("Max Loss", value=375.0, step=25.0)
+            entry_prob_profit = st.slider("Probability of Profit %", 50, 90, 75)
+        
+        if st.button("✅ Execute Trade", use_container_width=True):
+            try:
+                # Create option contracts
+                short_leg = OptionContract(
+                    symbol=f"{entry_symbol}_{datetime.now().strftime('%y%m%d')}C{int(entry_short_strike):08d}",
+                    strike_price=entry_short_strike,
+                    expiration_date=entry_expiration.strftime('%Y-%m-%d'),
+                    option_type="call" if "Call" in entry_spread_type else "put",
+                    bid_price=2.5, ask_price=2.6, volume=100, open_interest=500,
+                    delta=0.3, gamma=0.1, theta=-0.05, vega=0.2, implied_volatility=0.25
+                )
+                
+                long_leg = OptionContract(
+                    symbol=f"{entry_symbol}_{datetime.now().strftime('%y%m%d')}C{int(entry_long_strike):08d}",
+                    strike_price=entry_long_strike,
+                    expiration_date=entry_expiration.strftime('%Y-%m-%d'),
+                    option_type="call" if "Call" in entry_spread_type else "put",
+                    bid_price=1.2, ask_price=1.3, volume=80, open_interest=300,
+                    delta=0.2, gamma=0.08, theta=-0.03, vega=0.15, implied_volatility=0.22
+                )
+                
+                trade_data = {
+                    'symbol': entry_symbol,
+                    'strategy_type': 'credit_spread',
+                    'spread_type': entry_spread_type.lower().replace(' ', '_'),
+                    'short_leg': short_leg,
+                    'long_leg': long_leg,
+                    'contracts': entry_contracts,
+                    'entry_credit': entry_credit,
+                    'max_loss': entry_max_loss,
+                    'probability_profit': entry_prob_profit,
+                    'confidence_score': 80,
+                    'claude_reasoning': f"Manual {entry_spread_type} spread on {entry_symbol}"
+                }
+                
+                trade = asyncio.run(tm.add_trade(trade_data))
+                st.success(f"✅ Trade executed! ID: {trade.trade_id[:8]}")
+                st.info(f"Targets set - Profit: ${trade.profit_target:.2f} | Stop: ${trade.stop_loss_target:.2f}")
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)[:50]}...")
+    
+    with tab6:
+        # Settings Tab
+        st.markdown("""
+        <div style='text-align: center; padding: 20px;'>
+            <h2 style='color: #00c805;'>⚙️ Bot Settings & Configuration</h2>
+            <p style='color: #888;'>Configure your trading bot parameters</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Bot Configuration Section
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🤖 Bot Configuration")
             
-            pnl_data = [t.unrealized_pnl for t in tm.active_trades]
-            symbols = [t.symbol for t in tm.active_trades]
-            
-            fig = px.bar(
-                x=symbols,
-                y=pnl_data,
-                title="Current P&L by Trade",
-                labels={'x': 'Symbol', 'y': 'P&L ($)'},
-                color=pnl_data,
-                color_continuous_scale=['red', 'white', 'green']
+            # Symbols to monitor
+            new_symbols = st.multiselect(
+                "Symbols to Monitor",
+                ["SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA"],
+                default=st.session_state.bot_settings['symbols'],
+                help="Select which symbols the bot should monitor for volatility"
             )
             
-            fig.add_hline(y=0, line_dash="dash", line_color="gray")
-            st.plotly_chart(fig, use_container_width=True)
-    
-    else:
-        st.info("📭 No active trades. Add a trade above or start the bot to begin automated trading.")
-    
-    # Exit Conditions Reference
-    st.subheader("🎯 Current Exit Rules")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.success(f"""
-        **💰 Profit Target**
-        {rules.profit_target_percent:.0%} of max profit
+            # Minimum price move
+            new_min_move = st.slider(
+                "Minimum Price Move %",
+                0.5, 5.0, 
+                st.session_state.bot_settings['min_price_move'], 
+                0.1,
+                help="Minimum percentage move to trigger analysis"
+            )
+            
+            # Minimum IV rank
+            new_min_iv = st.slider(
+                "Minimum IV Rank",
+                50, 90,
+                st.session_state.bot_settings['min_iv_rank'],
+                5,
+                help="Minimum implied volatility rank for trade entry"
+            )
+            
+            # Scan interval
+            new_scan_interval = st.slider(
+                "Scan Interval (seconds)",
+                60, 600,
+                st.session_state.bot_settings['scan_interval'],
+                30,
+                help="How often to scan the market for opportunities"
+            )
+            
+            # Confidence threshold
+            new_confidence = st.slider(
+                "AI Confidence Threshold %",
+                50, 90,
+                st.session_state.bot_settings['confidence_threshold'],
+                5,
+                help="Minimum Claude confidence score to execute trades"
+            )
         
-        Example: $125 credit  
-        → Close at ${125 * rules.profit_target_percent:.2f}
-        """)
-    
-    with col2:
-        st.warning(f"""
-        **🛑 Stop Loss**
-        {rules.stop_loss_percent:.0%} of max loss
+        with col2:
+            st.subheader("💰 Risk Management")
+            
+            # Trade Management Rules
+            tm = st.session_state.trade_manager
+            rules = tm.rules
+            
+            # Profit target
+            new_profit_target = st.slider(
+                "Profit Target %",
+                20, 80,
+                int(rules.profit_target_percent * 100),
+                5,
+                help="Close trades at X% of maximum profit"
+            ) / 100
+            
+            # Stop loss
+            new_stop_loss = st.slider(
+                "Stop Loss %",
+                50, 100,
+                int(rules.stop_loss_percent * 100),
+                5,
+                help="Close trades at X% of maximum loss"
+            ) / 100
+            
+            # Time stop
+            new_time_stop = st.slider(
+                "Time Stop (DTE)",
+                1, 10,
+                rules.time_stop_dte,
+                1,
+                help="Close all trades at X days to expiration"
+            )
+            
+            # Max contracts
+            new_max_contracts = st.number_input(
+                "Max Contracts per Trade",
+                1, 20,
+                st.session_state.bot_settings['max_contracts'],
+                help="Maximum number of contracts per trade"
+            )
+            
+            # Max daily loss
+            new_daily_loss = st.number_input(
+                "Max Daily Loss $",
+                100, 5000,
+                int(rules.max_daily_loss),
+                50,
+                help="Stop all trading if daily loss exceeds this"
+            )
+            
+            # Account balance
+            new_balance = st.number_input(
+                "Account Balance $",
+                10000, 1000000,
+                st.session_state.bot_settings['account_balance'],
+                1000,
+                help="Total account balance for position sizing"
+            )
         
-        Example: $375 max loss  
-        → Stop at ${375 * rules.stop_loss_percent:.2f} loss
-        """)
-    
-    with col3:
-        st.error(f"""
-        **⏰ Time Stop**
-        Close at {rules.time_stop_dte} DTE
+        # Apply Settings Button
+        st.markdown("<br>", unsafe_allow_html=True)
         
-        Prevents assignment risk  
-        regardless of P&L
-        """)
+        if st.button("💾 Save Settings", use_container_width=True):
+            # Update bot settings
+            st.session_state.bot_settings['symbols'] = new_symbols
+            st.session_state.bot_settings['min_price_move'] = new_min_move
+            st.session_state.bot_settings['min_iv_rank'] = new_min_iv
+            st.session_state.bot_settings['scan_interval'] = new_scan_interval
+            st.session_state.bot_settings['confidence_threshold'] = new_confidence
+            st.session_state.bot_settings['max_contracts'] = new_max_contracts
+            st.session_state.bot_settings['account_balance'] = new_balance
+            
+            # Update trade manager rules
+            rules.profit_target_percent = new_profit_target
+            rules.stop_loss_percent = new_stop_loss
+            rules.time_stop_dte = new_time_stop
+            rules.max_daily_loss = float(new_daily_loss)
+            
+            # Update the bot if it's running
+            if st.session_state.full_bot:
+                bot = st.session_state.full_bot
+                bot.symbols = new_symbols
+                bot.min_price_move = new_min_move
+                bot.min_iv_rank = new_min_iv
+                bot.scan_interval = new_scan_interval
+                bot.trade_manager.rules = rules
+                
+                # Update account balance
+                bot.trade_manager.account_balance = new_balance
+            
+            st.success("✅ Settings saved successfully!")
+            
+            # Show current settings summary
+            st.info(f"""
+            **Current Configuration:**
+            - Monitoring: {', '.join(new_symbols)}
+            - Price Move: {new_min_move}% | IV Rank: {new_min_iv}
+            - Scan Every: {new_scan_interval}s | AI Confidence: {new_confidence}%
+            - Profit/Stop: {int(new_profit_target*100)}%/{int(new_stop_loss*100)}%
+            - Time Stop: {new_time_stop} DTE | Max Daily Loss: ${new_daily_loss}
+            """)
+        
+        # Current Rules Display
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader("📄 Current Exit Rules")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.success(f"""
+            **💰 Profit Target**
+            {rules.profit_target_percent:.0%} of max profit
+            
+            Example: $125 credit  
+            → Close at ${125 * rules.profit_target_percent:.2f}
+            """)
+        
+        with col2:
+            st.warning(f"""
+            **🛑 Stop Loss**
+            {rules.stop_loss_percent:.0%} of max loss
+            
+            Example: $375 max loss  
+            → Stop at ${375 * rules.stop_loss_percent:.2f} loss
+            """)
+        
+        with col3:
+            st.error(f"""
+            **⏰ Time Stop**
+            Close at {rules.time_stop_dte} DTE
+            
+            Prevents assignment risk  
+            regardless of P&L
+            """)
+        
+        # API Status Section
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader("🔌 API Status")
+        
+        api_cols = st.columns(3)
+        
+        with api_cols[0]:
+            alpaca_status = "🟢 Connected" if os.getenv('ALPACA_API_KEY') else "🔴 Not Set"
+            st.metric("Alpaca API", alpaca_status)
+        
+        with api_cols[1]:
+            claude_status = "🟢 Connected" if os.getenv('ANTHROPIC_API_KEY') else "🔴 Not Set"
+            st.metric("Claude API", claude_status)
+        
+        with api_cols[2]:
+            if st.button("🔄 Test Connections"):
+                with st.spinner("Testing API connections..."):
+                    try:
+                        # Test Alpaca
+                        account = tm.trading_client.get_account()
+                        st.success(f"✅ Alpaca: Connected (Balance: ${float(account.cash):.2f})")
+                    except Exception as e:
+                        st.error(f"❌ Alpaca: {str(e)[:50]}...")
+                    
+                    try:
+                        # Test Claude
+                        test_response = asyncio.run(tm.anthropic.messages.create(
+                            model="claude-3-sonnet-20240229",
+                            max_tokens=10,
+                            messages=[{"role": "user", "content": "Say 'OK'"}]
+                        ))
+                        st.success("✅ Claude: Connected")
+                    except Exception as e:
+                        st.error(f"❌ Claude: {str(e)[:50]}...")
     
-    # Footer with auto-refresh
+    # Footer
     st.markdown("---")
-    
-    # Market Status
-    now = datetime.now()
-    market_open = now.replace(hour=9, minute=30, second=0)
-    market_close = now.replace(hour=16, minute=0, second=0)
-    is_market_open = market_open <= now <= market_close and now.weekday() < 5
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        market_status = "🟢 OPEN" if is_market_open else "🔴 CLOSED"
-        st.metric("Market", market_status)
-    with col2:
-        st.metric("Current Time", now.strftime('%H:%M:%S'))
-    with col3:
-        if st.session_state.full_bot and st.session_state.full_bot.last_scan_time:
-            last_scan = st.session_state.full_bot.last_scan_time.strftime('%H:%M:%S')
-        else:
-            last_scan = "Not yet"
-        st.metric("Last Scan", last_scan)
+    st.caption("""
+    🤖 **Automated Features**: Real-time P&L tracking, profit targets, stop losses, time stops, Claude AI analysis
+    📊 **Options Data**: Live quotes and greeks from Alpaca Algo Trader Plus subscription
+    🔧 **Fully Customizable**: Adjust all rules in the Settings tab
+    """)
     
     # Auto-refresh for real-time updates
     if st.session_state.monitoring_active or st.session_state.bot_active:
         time.sleep(5)  # Refresh every 5 seconds when active
         st.rerun()
-    
-    st.caption("""
-    🤖 **Automated Features**: Real-time P&L tracking, profit targets, stop losses, time stops, Claude AI analysis
-    📊 **Options Data**: Live quotes and greeks from Alpaca Algo Trader Plus subscription
-    🔧 **Fully Customizable**: Adjust all rules in the sidebar
-    """)
 
 if __name__ == "__main__":
     main()
