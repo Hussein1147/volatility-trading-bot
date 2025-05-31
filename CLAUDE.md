@@ -14,3 +14,10 @@
 - Simplified 3-tab interface: Dashboard, Trades, Settings
 - All bot functionality preserved with clean, maintainable code
 - Testing suite ensures dashboard is actually live and accessible before claiming success
+
+## Trading Lifecycle Testing
+- Comprehensive test suite: `test_trading_lifecycle.py`
+- Simulates full trading lifecycle with Alpaca-compatible data structures
+- Tests market data, order execution, trade management, and analytics
+- Run with: `python test_trading_lifecycle.py`
+- See TRADING_TEST_GUIDE.md for detailed documentation
