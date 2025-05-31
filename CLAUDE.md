@@ -15,12 +15,9 @@
 - All bot functionality preserved with clean, maintainable code
 - Testing suite ensures dashboard is actually live and accessible before claiming success
 
-## Trading Lifecycle Testing
-- Comprehensive test suite: `test_trading_lifecycle.py`
-- Enhanced edge case testing: `test_trading_lifecycle_enhanced.py`
-- Simulates full trading lifecycle with Alpaca-compatible data structures
-- Tests market data, order execution, trade management, and analytics
-- Edge cases tested: 36 scenarios with 86% pass rate
-- Run basic tests: `python test_trading_simple.py` (100% pass rate)
-- Run edge case tests: `python test_trading_lifecycle_enhanced.py`
-- See TRADING_TEST_GUIDE.md and EDGE_CASES_TESTED.md for documentation
+## Testing
+- Dashboard tests: `python launch_dashboard.py` (includes verification)
+- Trading tests: `python test_trading_comprehensive.py` (100% pass rate)
+- All tests consolidated for simplicity
+- Edge cases fully covered including flash crashes, circuit breakers, etc.
+- See TESTING_GUIDE.md for complete documentation
