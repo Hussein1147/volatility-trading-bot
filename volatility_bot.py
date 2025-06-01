@@ -1,11 +1,12 @@
 import os
 import asyncio
 import json
-from datetime import datetime, timedelta
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple
+from datetime import datetime, timedelta, date
+from dataclasses import dataclass, asdict
+from typing import List, Optional, Dict, Tuple, Any
 import logging
 from decimal import Decimal
+import threading
 
 # Alpaca and other imports
 from alpaca.trading.client import TradingClient
@@ -21,13 +22,25 @@ import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
 
+# FastAPI for health checks
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+import uvicorn
+
+# Database integration
+from database import DatabaseManager, Trade, MarketSnapshot, PerformanceMetric
+
 # Load environment variables
 load_dotenv()
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/app/logs/bot.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -56,8 +69,59 @@ class CreditSpreadSignal:
     confidence: float
     reasoning: str
 
-class AlpacaVolatilityBot:
+class HealthCheckAPI:
+    def __init__(self, bot):
+        self.app = FastAPI(title="Volatility Trading Bot API")
+        self.bot = bot
+        self.setup_routes()
+    
+    def setup_routes(self):
+        @self.app.get("/health")
+        async def health_check():
+            try:
+                # Check database connection
+                async with self.bot.db.get_session() as session:
+                    await session.execute("SELECT 1")
+                
+                # Check bot status
+                status = {
+                    "status": "healthy",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "active_trades": len(self.bot.active_trades),
+                    "last_scan": self.bot.last_scan_time.isoformat() if self.bot.last_scan_time else None,
+                    "database": "connected"
+                }
+                return JSONResponse(content=status)
+            except Exception as e:
+                logger.error(f"Health check failed: {e}")
+                raise HTTPException(status_code=503, detail="Service unhealthy")
+        
+        @self.app.get("/status")
+        async def bot_status():
+            try:
+                performance = await self.bot.db.get_performance_summary()
+                open_trades = await self.bot.db.get_open_trades()
+                
+                return JSONResponse(content={
+                    "bot_status": "running" if self.bot.is_running else "stopped",
+                    "performance": performance,
+                    "open_trades_count": len(open_trades),
+                    "account_balance": self.bot.account_balance,
+                    "market_hours": self.bot.is_market_hours()
+                })
+            except Exception as e:
+                logger.error(f"Status check failed: {e}")
+                raise HTTPException(status_code=500, detail="Status check failed")
+    
+    def run(self):
+        uvicorn.run(self.app, host="0.0.0.0", port=8080, log_level="info")
+
+class EnhancedAlpacaVolatilityBot:
     def __init__(self):
+        # Database setup
+        database_url = os.getenv('DATABASE_URL', 'postgresql://bot_user:bot_password@localhost:5432/trading_bot')
+        self.db = DatabaseManager(database_url)
+        
         # Initialize Alpaca clients
         self.trading_client = TradingClient(
             api_key=os.getenv('ALPACA_API_KEY'),
@@ -92,14 +156,44 @@ class AlpacaVolatilityBot:
         self.dte_max = 45
         self.delta_target_short = 0.20  # 20 delta for short strike
         
+        # Bot state
+        self.is_running = False
+        self.last_scan_time = None
+        
+        # Performance tracking
+        self.daily_pnl = 0
+        self.trade_count = 0
+        
+    def is_market_hours(self) -> bool:
+        """Check if market is currently open"""
+        now = datetime.now()
+        market_open = now.replace(hour=9, minute=30, second=0)
+        market_close = now.replace(hour=16, minute=0, second=0)
+        
+        # Check if it's a weekday
+        if now.weekday() >= 5:  # Weekend
+            return False
+            
+        return market_open <= now <= market_close
+    
     async def get_account_info(self):
         """Get current account information"""
         try:
             account = self.trading_client.get_account()
+            self.account_balance = float(account.cash)
+            
+            await self.db.log_bot_event(
+                "INFO", 
+                f"Account Balance: ${account.cash}, Buying Power: ${account.buying_power}",
+                "volatility_bot",
+                "get_account_info"
+            )
+            
             logger.info(f"Account Balance: ${account.cash}")
             logger.info(f"Buying Power: ${account.buying_power}")
             return account
         except Exception as e:
+            await self.db.log_bot_event("ERROR", f"Error getting account info: {e}")
             logger.error(f"Error getting account info: {e}")
             return None
     
@@ -138,6 +232,7 @@ class AlpacaVolatilityBot:
             
         except Exception as e:
             logger.error(f"Error calculating IV metrics: {e}")
+            await self.db.log_bot_event("ERROR", f"Error calculating IV metrics for {symbol}: {e}")
             return 50.0, 50.0  # Default values
     
     async def get_market_data(self, symbol: str) -> Optional[MarketData]:
@@ -170,6 +265,18 @@ class AlpacaVolatilityBot:
             # Calculate IV metrics
             iv_rank, iv_percentile = await self.calculate_iv_metrics(symbol)
             
+            # Save market snapshot to database
+            snapshot_data = {
+                'symbol': symbol,
+                'current_price': current_price,
+                'percent_change': percent_change,
+                'volume': volume,
+                'iv_rank': iv_rank,
+                'iv_percentile': iv_percentile,
+                'news_catalyst': "Market volatility event detected" if abs(percent_change) >= self.min_price_move else None
+            }
+            await self.db.save_market_snapshot(snapshot_data)
+            
             # Check if this is a significant move
             if abs(percent_change) >= self.min_price_move and iv_rank >= self.min_iv_rank:
                 return MarketData(
@@ -187,6 +294,7 @@ class AlpacaVolatilityBot:
             
         except Exception as e:
             logger.error(f"Error getting market data for {symbol}: {e}")
+            await self.db.log_bot_event("ERROR", f"Error getting market data for {symbol}: {e}")
             return None
     
     async def analyze_with_claude(self, market_data: MarketData) -> Optional[CreditSpreadSignal]:
@@ -229,7 +337,7 @@ class AlpacaVolatilityBot:
         
         try:
             response = await self.anthropic.messages.create(
-                model="claude-3-opus-20240229",
+                model="claude-3-sonnet-20240229",
                 max_tokens=500,
                 messages=[{"role": "user", "content": prompt}]
             )
@@ -257,10 +365,11 @@ class AlpacaVolatilityBot:
                 
         except Exception as e:
             logger.error(f"Error analyzing with Claude: {e}")
+            await self.db.log_bot_event("ERROR", f"Error analyzing with Claude: {e}")
             return None
     
-    async def execute_credit_spread(self, signal: CreditSpreadSignal):
-        """Execute credit spread trade on Alpaca"""
+    async def execute_credit_spread(self, signal: CreditSpreadSignal) -> str:
+        """Execute credit spread trade and save to database"""
         try:
             # Log the trade signal
             logger.info(f"\n{'='*50}")
@@ -278,21 +387,57 @@ class AlpacaVolatilityBot:
             logger.info(f"Reasoning: {signal.reasoning}")
             logger.info(f"{'='*50}\n")
             
-            # In production, you would:
-            # 1. Format option symbols (e.g., "SPY231117C00450000")
-            # 2. Submit multi-leg order using Alpaca's API
-            # 3. Set up monitoring for profit targets
+            # Save trade to database
+            trade_data = {
+                'symbol': signal.symbol,
+                'strategy_type': 'credit_spread',
+                'spread_type': signal.spread_type,
+                'short_strike': signal.short_strike,
+                'long_strike': signal.long_strike,
+                'expiration_date': datetime.strptime(signal.expiration, '%Y-%m-%d').date(),
+                'contracts': signal.contracts,
+                'credit_received': signal.credit_received,
+                'max_loss': signal.max_loss,
+                'probability_profit': signal.probability_profit,
+                'confidence_score': signal.confidence,
+                'claude_reasoning': signal.reasoning,
+                'status': 'open'
+            }
             
-            # For now, track the paper trade
+            trade_id = await self.db.save_trade(trade_data)
+            
+            # Create alert
+            await self.db.create_alert(
+                'trade_executed',
+                f"Executed {signal.spread_type} on {signal.symbol} for ${signal.credit_received:.2f} credit",
+                trade_id
+            )
+            
+            # Track the paper trade
             self.active_trades.append({
+                'trade_id': trade_id,
                 'signal': signal,
                 'entry_time': datetime.now(),
                 'status': 'open',
                 'target_profit': signal.credit_received * self.profit_target_percent
             })
             
+            self.trade_count += 1
+            
+            await self.db.log_bot_event(
+                "INFO", 
+                f"Executed trade {trade_id}: {signal.spread_type} on {signal.symbol}",
+                "volatility_bot",
+                "execute_credit_spread",
+                trade_id
+            )
+            
+            return trade_id
+            
         except Exception as e:
             logger.error(f"Error executing trade: {e}")
+            await self.db.log_bot_event("ERROR", f"Error executing trade: {e}")
+            raise
     
     async def monitor_positions(self):
         """Monitor open positions for profit targets or stop losses"""
@@ -308,10 +453,59 @@ class AlpacaVolatilityBot:
                         if unrealized_pl >= trade['target_profit']:
                             logger.info(f"Profit target reached for {position.symbol}")
                             logger.info(f"Unrealized P/L: ${unrealized_pl:.2f}")
-                            # In production, close the position here
+                            
+                            # Update trade in database
+                            await self.db.update_trade(
+                                trade['trade_id'],
+                                {
+                                    'status': 'closed',
+                                    'exit_time': datetime.utcnow(),
+                                    'realized_pnl': unrealized_pl,
+                                    'exit_price': float(position.current_price)
+                                }
+                            )
+                            
+                            # Create alert
+                            await self.db.create_alert(
+                                'profit_target',
+                                f"Profit target reached for {position.symbol}: ${unrealized_pl:.2f}",
+                                trade['trade_id']
+                            )
+                            
+                            trade['status'] = 'closed'
+                            self.daily_pnl += unrealized_pl
                             
         except Exception as e:
             logger.error(f"Error monitoring positions: {e}")
+            await self.db.log_bot_event("ERROR", f"Error monitoring positions: {e}")
+    
+    async def update_daily_performance(self):
+        """Update daily performance metrics"""
+        try:
+            today = date.today()
+            
+            # Calculate metrics
+            open_trades = await self.db.get_open_trades()
+            performance_summary = await self.db.get_performance_summary(1)  # Today only
+            
+            total_trades = performance_summary.get('total_trades', 0)
+            winning_trades = performance_summary.get('winning_trades', 0)
+            win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+            
+            metrics = {
+                'total_trades': total_trades,
+                'winning_trades': winning_trades,
+                'losing_trades': total_trades - winning_trades,
+                'daily_pnl': self.daily_pnl,
+                'account_balance': self.account_balance,
+                'win_rate': win_rate
+            }
+            
+            await self.db.update_performance_metrics(today, metrics)
+            
+        except Exception as e:
+            logger.error(f"Error updating performance metrics: {e}")
+            await self.db.log_bot_event("ERROR", f"Error updating performance metrics: {e}")
     
     async def phase2_volatility_contraction(self, original_signal: CreditSpreadSignal):
         """Check for volatility contraction opportunity (Phase 2)"""
@@ -322,11 +516,16 @@ class AlpacaVolatilityBot:
         
         if market_data and market_data.iv_rank < 60:  # IV has contracted
             logger.info("Volatility contraction detected - analyzing Phase 2 opportunity")
+            await self.db.log_bot_event(
+                "INFO",
+                f"Volatility contraction detected for {original_signal.symbol} - Phase 2 opportunity"
+            )
             # Could add butterfly or opposite side credit spread here
     
     async def scan_for_opportunities(self):
         """Main scanning loop for all symbols"""
         logger.info(f"Scanning {len(self.symbols)} symbols for opportunities...")
+        self.last_scan_time = datetime.utcnow()
         
         for symbol in self.symbols:
             market_data = await self.get_market_data(symbol)
@@ -338,16 +537,18 @@ class AlpacaVolatilityBot:
                 signal = await self.analyze_with_claude(market_data)
                 
                 if signal and signal.confidence >= 70:
-                    await self.execute_credit_spread(signal)
+                    trade_id = await self.execute_credit_spread(signal)
                     
                     # Schedule phase 2 check
                     asyncio.create_task(self.phase2_volatility_contraction(signal))
     
-    async def run(self):
+    async def run_bot(self):
         """Main bot loop"""
         logger.info("="*60)
-        logger.info("Alpaca Volatility Trading Bot Started")
+        logger.info("Enhanced Alpaca Volatility Trading Bot Started")
         logger.info("="*60)
+        
+        self.is_running = True
         
         # Get initial account info
         await self.get_account_info()
@@ -357,16 +558,15 @@ class AlpacaVolatilityBot:
         logger.info(f"Min Price Move: {self.min_price_move}%")
         logger.info(f"Max Risk per Trade: ${self.max_risk_per_trade * self.account_balance:.2f}")
         
-        while True:
+        await self.db.log_bot_event("INFO", "Bot started successfully")
+        
+        while self.is_running:
             try:
-                # Market hours check (9:30 AM - 4:00 PM ET)
-                now = datetime.now()
-                market_open = now.replace(hour=9, minute=30, second=0)
-                market_close = now.replace(hour=16, minute=0, second=0)
-                
-                if market_open <= now <= market_close:
+                # Market hours check
+                if self.is_market_hours():
                     await self.scan_for_opportunities()
                     await self.monitor_positions()
+                    await self.update_daily_performance()
                 else:
                     logger.info("Market closed - waiting...")
                 
@@ -375,31 +575,32 @@ class AlpacaVolatilityBot:
                 
             except Exception as e:
                 logger.error(f"Bot error: {e}")
+                await self.db.log_bot_event("ERROR", f"Bot error: {e}")
                 await asyncio.sleep(60)
+    
+    async def stop_bot(self):
+        """Stop the bot gracefully"""
+        logger.info("Stopping bot...")
+        self.is_running = False
+        await self.db.log_bot_event("INFO", "Bot stopped")
+        await self.db.close()
 
-# Create .env template
-env_template = """# Alpaca API Credentials (get from alpaca.markets dashboard)
-ALPACA_API_KEY=your_api_key_here
-ALPACA_SECRET_KEY=your_secret_key_here
-
-# Claude API Key (get from anthropic.com)
-ANTHROPIC_API_KEY=your_claude_api_key_here
-
-# Optional: Discord webhook for alerts
-DISCORD_WEBHOOK=your_webhook_url_here
-"""
+async def main():
+    """Main function to run bot and health check API"""
+    bot = EnhancedAlpacaVolatilityBot()
+    health_api = HealthCheckAPI(bot)
+    
+    # Start health check API in separate thread
+    api_thread = threading.Thread(target=health_api.run, daemon=True)
+    api_thread.start()
+    
+    try:
+        # Run the trading bot
+        await bot.run_bot()
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal")
+    finally:
+        await bot.stop_bot()
 
 if __name__ == "__main__":
-    # Check for .env file
-    if not os.path.exists('.env'):
-        with open('.env', 'w') as f:
-            f.write(env_template)
-        print("Created .env file - please add your API keys")
-        print("1. Go to alpaca.markets and create an account")
-        print("2. Generate paper trading API keys")
-        print("3. Add them to the .env file")
-        exit()
-    
-    # Run the bot
-    bot = AlpacaVolatilityBot()
-    asyncio.run(bot.run())
+    asyncio.run(main())
