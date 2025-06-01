@@ -83,23 +83,33 @@ class Trade:
     exit_reason: Optional[str] = None
 
 class EnhancedTradeManager:
-    def __init__(self):
+    def __init__(self, paper_trading=True):
+        # Determine which API keys to use based on mode
+        if paper_trading:
+            api_key = os.getenv('ALPACA_API_KEY_PAPER_TRADING')
+            secret_key = os.getenv('ALPACA_SECRET_KEY_PAPER_TRADING')
+        else:
+            api_key = os.getenv('ALPACA_API_KEY')
+            secret_key = os.getenv('ALPACA_SECRET_KEY')
+            
+        logger.info(f"Initializing TradeManager in {'PAPER' if paper_trading else 'LIVE'} mode")
+        
         # Initialize Alpaca clients
         self.trading_client = TradingClient(
-            api_key=os.getenv('ALPACA_API_KEY'),
-            secret_key=os.getenv('ALPACA_SECRET_KEY'),
-            paper=True
+            api_key=api_key,
+            secret_key=secret_key,
+            paper=paper_trading
         )
         
         self.data_client = StockHistoricalDataClient(
-            api_key=os.getenv('ALPACA_API_KEY'),
-            secret_key=os.getenv('ALPACA_SECRET_KEY')
+            api_key=api_key,
+            secret_key=secret_key
         )
         
         # Options data client (for real-time options data)
         self.options_client = OptionHistoricalDataClient(
-            api_key=os.getenv('ALPACA_API_KEY'),
-            secret_key=os.getenv('ALPACA_SECRET_KEY')
+            api_key=api_key,
+            secret_key=secret_key
         )
         
         # Initialize Claude
@@ -126,42 +136,71 @@ class EnhancedTradeManager:
             )
             
             options_data = self.options_client.get_option_chain(request)
-            logger.info(f"Retrieved {len(options_data) if options_data else 0} option contracts for {symbol}")
             
             contracts = []
-            for option in options_data:
-                try:
-                    # Handle different data structures from Alpaca API
-                    option_symbol = getattr(option, 'symbol', f"{symbol}_{expiration}")
-                    strike_price = float(getattr(option, 'strike_price', 0))
-                    option_type = getattr(option, 'option_type', 'call')
-                    
-                    # Convert option_type to lowercase string if it's an enum
-                    if hasattr(option_type, 'value'):
-                        option_type = option_type.value.lower()
-                    else:
-                        option_type = str(option_type).lower()
-                    
-                    contract = OptionContract(
-                        symbol=option_symbol,
-                        strike_price=strike_price,
-                        expiration_date=expiration,
-                        option_type=option_type,
-                        bid_price=float(getattr(option, 'bid_price', 0) or 0),
-                        ask_price=float(getattr(option, 'ask_price', 0) or 0),
-                        volume=int(getattr(option, 'volume', 0) or 0),
-                        open_interest=int(getattr(option, 'open_interest', 0) or 0),
-                        delta=float(getattr(option, 'delta', 0) or 0),
-                        gamma=float(getattr(option, 'gamma', 0) or 0),
-                        theta=float(getattr(option, 'theta', 0) or 0),
-                        vega=float(getattr(option, 'vega', 0) or 0),
-                        implied_volatility=float(getattr(option, 'implied_volatility', 0) or 0)
-                    )
-                    contracts.append(contract)
-                    
-                except Exception as contract_error:
-                    logger.warning(f"Error processing option contract: {contract_error}")
-                    continue
+            
+            # Handle dict response from Alpaca API
+            if isinstance(options_data, dict):
+                logger.info(f"Retrieved {len(options_data)} option contracts for {symbol}")
+                
+                for option_symbol, option in options_data.items():
+                    try:
+                        # Extract fields from the option object
+                        # Check for nested structures like latest_quote
+                        if hasattr(option, 'latest_quote') and option.latest_quote:
+                            bid_price = float(getattr(option.latest_quote, 'bid_price', 0) or 0)
+                            ask_price = float(getattr(option.latest_quote, 'ask_price', 0) or 0)
+                        else:
+                            bid_price = float(getattr(option, 'bid_price', 0) or 0)
+                            ask_price = float(getattr(option, 'ask_price', 0) or 0)
+                        
+                        # Extract greeks if available
+                        if hasattr(option, 'greeks') and option.greeks:
+                            delta = float(getattr(option.greeks, 'delta', 0) or 0)
+                            gamma = float(getattr(option.greeks, 'gamma', 0) or 0)
+                            theta = float(getattr(option.greeks, 'theta', 0) or 0)
+                            vega = float(getattr(option.greeks, 'vega', 0) or 0)
+                        else:
+                            delta = float(getattr(option, 'delta', 0) or 0)
+                            gamma = float(getattr(option, 'gamma', 0) or 0)
+                            theta = float(getattr(option, 'theta', 0) or 0)
+                            vega = float(getattr(option, 'vega', 0) or 0)
+                        
+                        # Extract IV
+                        if hasattr(option, 'implied_volatility'):
+                            iv = float(option.implied_volatility or 0)
+                        elif hasattr(option, 'greeks') and hasattr(option.greeks, 'implied_volatility'):
+                            iv = float(option.greeks.implied_volatility or 0)
+                        else:
+                            iv = 0
+                        
+                        # Parse option symbol to extract details
+                        # Alpaca format: "AAPL211015C00145000"
+                        strike_price = float(getattr(option, 'strike_price', 0))
+                        option_type = 'call' if 'C' in option_symbol else 'put'
+                        
+                        contract = OptionContract(
+                            symbol=option_symbol,
+                            strike_price=strike_price,
+                            expiration_date=expiration,
+                            option_type=option_type,
+                            bid_price=bid_price,
+                            ask_price=ask_price,
+                            volume=int(getattr(option, 'volume', 0) or 0),
+                            open_interest=int(getattr(option, 'open_interest', 0) or 0),
+                            delta=delta,
+                            gamma=gamma,
+                            theta=theta,
+                            vega=vega,
+                            implied_volatility=iv
+                        )
+                        contracts.append(contract)
+                        
+                    except Exception as contract_error:
+                        logger.warning(f"Error processing option {option_symbol}: {contract_error}")
+                        continue
+            else:
+                logger.warning(f"Unexpected options data type: {type(options_data)}")
             
             logger.info(f"Successfully processed {len(contracts)} option contracts")
             return contracts
@@ -219,6 +258,79 @@ class EnhancedTradeManager:
             contracts.append(put_contract)
         
         return contracts
+    
+    def _parse_options_snapshot(self, symbol: str, snapshot, expiration: str) -> Optional[OptionContract]:
+        """Parse Alpaca OptionsSnapshot into our OptionContract format"""
+        try:
+            # Extract nested data safely
+            bid_price = 0.0
+            ask_price = 0.0
+            
+            if hasattr(snapshot, 'latest_quote') and snapshot.latest_quote:
+                bid_price = float(getattr(snapshot.latest_quote, 'bid_price', 0) or 0)
+                ask_price = float(getattr(snapshot.latest_quote, 'ask_price', 0) or 0)
+            
+            # Extract Greeks from nested structure
+            delta = gamma = theta = vega = 0.0
+            if hasattr(snapshot, 'greeks') and snapshot.greeks:
+                delta = float(getattr(snapshot.greeks, 'delta', 0) or 0)
+                gamma = float(getattr(snapshot.greeks, 'gamma', 0) or 0)
+                theta = float(getattr(snapshot.greeks, 'theta', 0) or 0)
+                vega = float(getattr(snapshot.greeks, 'vega', 0) or 0)
+            
+            # Extract strike and type from symbol
+            strike_price = self._extract_strike_from_symbol(symbol)
+            option_type = self._extract_type_from_symbol(symbol)
+            
+            # Extract other fields
+            volume = int(getattr(snapshot, 'volume', 0) or 0)
+            open_interest = int(getattr(snapshot, 'open_interest', 0) or 0)
+            implied_volatility = float(getattr(snapshot, 'implied_volatility', 0) or 0)
+            
+            return OptionContract(
+                symbol=symbol,
+                strike_price=strike_price,
+                expiration_date=expiration,
+                option_type=option_type,
+                bid_price=bid_price,
+                ask_price=ask_price,
+                volume=volume,
+                open_interest=open_interest,
+                delta=delta,
+                gamma=gamma,
+                theta=theta,
+                vega=vega,
+                implied_volatility=implied_volatility
+            )
+        except Exception as e:
+            logger.error(f"Failed to parse snapshot for {symbol}: {e}")
+            return None
+    
+    def _extract_strike_from_symbol(self, symbol: str) -> float:
+        """Extract strike price from option symbol"""
+        try:
+            # Alpaca format: SPY250131C00450000
+            # The last 8 digits are the strike price (in cents)
+            strike_str = symbol[-8:]
+            strike_cents = int(strike_str)
+            return strike_cents / 100.0
+        except:
+            logger.error(f"Failed to extract strike from {symbol}")
+            return 0.0
+    
+    def _extract_type_from_symbol(self, symbol: str) -> str:
+        """Extract option type from symbol"""
+        try:
+            # Check for C or P in the symbol
+            if 'C' in symbol[6:]:  # After the underlying and date
+                return "call"
+            elif 'P' in symbol[6:]:
+                return "put"
+            else:
+                return "unknown"
+        except:
+            logger.error(f"Failed to extract type from {symbol}")
+            return "unknown"
     
     async def calculate_current_trade_value(self, trade: Trade) -> Tuple[float, float]:
         """Calculate current value and P&L of a trade using real options data"""
@@ -550,3 +662,96 @@ class EnhancedTradeManager:
             "monitoring_active": self.is_monitoring,
             "last_check": self.last_check_time
         }
+    
+    async def execute_options_trade(self, symbol: str, analysis: Dict[str, Any], market_data: Dict[str, Any]) -> Trade:
+        """Execute an options trade based on Claude's analysis"""
+        try:
+            logger.info(f"Executing {analysis['spread_type']} for {symbol}")
+            
+            # Get the expiration date
+            expiration_days = analysis.get('expiration_days', 14)
+            expiration_date = (datetime.now() + timedelta(days=expiration_days)).strftime('%Y-%m-%d')
+            
+            # Get options chain
+            options_data = await self.get_real_time_options_data(symbol, expiration_date)
+            
+            # Find the specific contracts
+            short_contract = None
+            long_contract = None
+            
+            for contract in options_data:
+                if contract.strike_price == analysis['short_strike'] and contract.option_type == analysis['spread_type'].split('_')[0]:
+                    short_contract = contract
+                elif contract.strike_price == analysis['long_strike'] and contract.option_type == analysis['spread_type'].split('_')[0]:
+                    long_contract = contract
+            
+            if not short_contract or not long_contract:
+                logger.error(f"Could not find matching contracts for strikes {analysis['short_strike']}/{analysis['long_strike']}")
+                return None
+            
+            # Calculate actual credit and validate
+            actual_credit = (short_contract.bid_price - long_contract.ask_price) * 100 * analysis['contracts']
+            
+            if actual_credit <= 0:
+                logger.warning(f"No credit available for spread: ${actual_credit:.2f}")
+                return None
+            
+            # Execute the trades
+            orders = []
+            
+            # Sell short leg
+            short_order = MarketOrderRequest(
+                symbol=short_contract.symbol,
+                qty=analysis['contracts'],
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY
+            )
+            
+            short_response = self.trading_client.submit_order(short_order)
+            orders.append(short_response)
+            logger.info(f"Submitted SELL order for short leg: {short_response.id}")
+            
+            # Buy long leg
+            long_order = MarketOrderRequest(
+                symbol=long_contract.symbol,
+                qty=analysis['contracts'],
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY
+            )
+            
+            long_response = self.trading_client.submit_order(long_order)
+            orders.append(long_response)
+            logger.info(f"Submitted BUY order for long leg: {long_response.id}")
+            
+            # Create trade object
+            max_loss = abs(analysis['short_strike'] - analysis['long_strike']) * 100 * analysis['contracts']
+            
+            trade_data = {
+                'symbol': symbol,
+                'strategy_type': analysis['spread_type'],
+                'spread_type': analysis['spread_type'],
+                'short_leg': short_contract,
+                'long_leg': long_contract,
+                'contracts': analysis['contracts'],
+                'entry_credit': actual_credit,
+                'max_loss': max_loss,
+                'days_to_expiration': expiration_days,
+                'probability_profit': analysis.get('probability_profit', 65),
+                'confidence_score': analysis['confidence'],
+                'claude_reasoning': analysis['reasoning']
+            }
+            
+            trade = await self.add_trade(trade_data)
+            
+            # Log execution
+            logger.info(f"Trade executed successfully: {trade.trade_id}")
+            logger.info(f"   Type: {analysis['spread_type']}")
+            logger.info(f"   Strikes: ${analysis['short_strike']}/{analysis['long_strike']}")
+            logger.info(f"   Credit: ${actual_credit:.2f}")
+            logger.info(f"   Max Loss: ${max_loss:.2f}")
+            
+            return trade
+            
+        except Exception as e:
+            logger.error(f"Error executing trade: {e}")
+            return None
