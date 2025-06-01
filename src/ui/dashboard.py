@@ -10,13 +10,13 @@ import json
 import threading
 import time
 import numpy as np
-from trade_manager import EnhancedTradeManager, TradeManagementRules, OptionContract
+from src.core.trade_manager import EnhancedTradeManager, TradeManagementRules, OptionContract
 from dotenv import load_dotenv
 import os
 import random
-from trade_db import trade_db
-from position_tracker import PositionTracker, get_current_positions, get_option_spreads
-from simulated_pnl import simulated_tracker
+from src.data.trade_db import trade_db
+from src.core.position_tracker import PositionTracker, get_current_positions, get_option_spreads
+from src.data.simulated_pnl import simulated_tracker
 
 load_dotenv()
 
@@ -553,7 +553,9 @@ class FullAutomatedBot:
                 
                 # Simulate credit calculation
                 expected_credit = analysis['expected_credit'] * analysis['contracts'] * 100
-                max_loss = 500 * analysis['contracts']  # $5 spread width
+                # Max loss per contract = spread width - credit per contract
+                max_loss_per_contract = 5.00 - analysis['expected_credit']  # $5 spread width
+                max_loss = max_loss_per_contract * analysis['contracts'] * 100  # Total max loss
                 
                 self.log(f"   ➡️ Expected Credit: ${expected_credit:.2f}")
                 self.log(f"   ➡️ Max Loss: ${max_loss:.2f}")

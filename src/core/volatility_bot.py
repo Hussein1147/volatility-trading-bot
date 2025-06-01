@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 import uvicorn
 
 # Database integration
-from database import DatabaseManager, Trade, MarketSnapshot, PerformanceMetric
+from src.data.database import DatabaseManager, Trade, MarketSnapshot, PerformanceMetric
 
 # Load environment variables
 load_dotenv()
@@ -185,7 +185,7 @@ class EnhancedAlpacaVolatilityBot:
             await self.db.log_bot_event(
                 "INFO", 
                 f"Account Balance: ${account.cash}, Buying Power: ${account.buying_power}",
-                "enhanced_volatility_bot",
+                "volatility_bot",
                 "get_account_info"
             )
             
@@ -427,7 +427,7 @@ class EnhancedAlpacaVolatilityBot:
             await self.db.log_bot_event(
                 "INFO", 
                 f"Executed trade {trade_id}: {signal.spread_type} on {signal.symbol}",
-                "enhanced_volatility_bot",
+                "volatility_bot",
                 "execute_credit_spread",
                 trade_id
             )

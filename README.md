@@ -75,8 +75,20 @@ ANTHROPIC_API_KEY=your_claude_api_key_here
 
 ### 5. Running the Bot
 
+#### Run the Dashboard (Recommended):
 ```bash
-python volatility_bot.py
+python run_dashboard.py
+```
+
+This opens a Streamlit dashboard at http://localhost:8501 with:
+- Real-time position monitoring
+- P&L tracking
+- Trade history
+- Claude AI analysis logs
+
+#### Run the Bot Directly:
+```bash
+python -m src.core.volatility_bot
 ```
 
 The bot will:
@@ -84,6 +96,29 @@ The bot will:
 - Start monitoring market conditions during trading hours (9:30 AM - 4:00 PM ET)
 - Log all analysis and trades to console
 - Execute paper trades when opportunities are found
+
+## Project Structure
+
+```
+volatility-trading-bot/
+├── src/
+│   ├── core/           # Core trading logic
+│   │   ├── trade_manager.py      # Trade execution and management
+│   │   ├── position_tracker.py   # Position monitoring
+│   │   └── volatility_bot.py     # Main bot logic
+│   ├── data/           # Data management
+│   │   ├── trade_db.py          # Trade history database
+│   │   ├── simulated_pnl.py     # P&L simulation for dev mode
+│   │   └── database.py          # PostgreSQL models (optional)
+│   └── ui/             # User interface
+│       └── dashboard.py         # Streamlit dashboard
+├── deployment/         # Deployment configurations
+├── docs/              # Documentation
+├── scripts/           # Utility scripts
+├── requirements.txt   # Python dependencies
+├── run_dashboard.py   # Dashboard entry point
+└── README.md         # This file
+```
 
 ## Trading Parameters
 
