@@ -21,3 +21,15 @@
 - All tests consolidated for simplicity
 - Edge cases fully covered including flash crashes, circuit breakers, etc.
 - See TESTING_GUIDE.md for complete documentation
+- Remember to run all test before deploying dashboard
+- always verify and test dashboard before launching
+
+## Project Workflow
+- Read all the readme before starting sessions
+- IMPORTANT: Do not create new Python files unnecessarily, especially for volatility bot and dashboard files
+- Always clean up after coding to maintain project organization and reduce clutter
+- Make sure to always clean up temporary files after finishing development and clean up the code base
+
+## Development Guidance
+- Verify assumptions if you're not sure and ask me if necessary but don't be overly eager to ask. Use your better judgment to avoid mistakes
+- Please remember to run all test before launching dashboard
