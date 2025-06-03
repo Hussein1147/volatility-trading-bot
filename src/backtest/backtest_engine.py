@@ -52,6 +52,8 @@ class BacktestTrade:
     max_loss: float = 0
     exit_reason: str = ""
     days_in_trade: int = 0
+    confidence_score: int = 0
+    confidence_breakdown: Optional[Dict] = None
     
 @dataclass
 class BacktestResults:
@@ -249,6 +251,15 @@ class BacktestEngine:
             "expected_credit": amount per contract,
             "probability_profit": percentage,
             "confidence": 0-100,
+            "confidence_breakdown": {{
+                "base_score": 50,
+                "market_conditions": {{"iv_rank": score, "price_move": score, "volume": score}},
+                "strategy_alignment": {{"spread_selection": score, "strike_distance": score}},
+                "risk_management": {{"position_sizing": score, "expiration": score}},
+                "technical_factors": {{"support_resistance": score, "trend": score}},
+                "deductions": {{"risks": list_of_risks_and_scores}},
+                "calculation": "show the math: 50 + X - Y = final_score"
+            }},
             "reasoning": "explanation"
         }}
         """
@@ -262,14 +273,46 @@ class BacktestEngine:
             
             # Parse JSON from response
             import re
-            json_match = re.search(r'\{.*\}', response.content[0].text, re.DOTALL)
-            if json_match:
-                analysis = json.loads(json_match.group(0))
+            # Look for JSON block, handling nested braces
+            content = response.content[0].text
+            
+            # Try to find JSON between ```json markers first
+            json_code_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
+            if json_code_match:
+                json_str = json_code_match.group(1)
+            else:
+                # Fall back to finding the outermost JSON object
+                # Count braces to find complete JSON
+                start = content.find('{')
+                if start == -1:
+                    return None
+                    
+                brace_count = 0
+                end = start
+                for i in range(start, len(content)):
+                    if content[i] == '{':
+                        brace_count += 1
+                    elif content[i] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end = i + 1
+                            break
+                
+                json_str = content[start:end]
+            
+            try:
+                analysis = json.loads(json_str)
                 if analysis.get('should_trade'):
                     return analysis
+            except json.JSONDecodeError as je:
+                logger.error(f"JSON decode error: {je}")
+                logger.debug(f"Attempted to parse: {json_str[:200]}...")
                     
         except Exception as e:
             logger.error(f"Claude analysis error: {e}")
+            # Log the raw response for debugging
+            if 'response' in locals():
+                logger.debug(f"Raw Claude response: {response.content[0].text[:500]}")
             
         return None
         
@@ -299,7 +342,9 @@ class BacktestEngine:
             contracts=contracts,
             entry_credit=total_credit,
             max_profit=total_credit,
-            max_loss=max_loss
+            max_loss=max_loss,
+            confidence_score=analysis.get('confidence', 0),
+            confidence_breakdown=analysis.get('confidence_breakdown', None)
         )
         
         # Store in open positions

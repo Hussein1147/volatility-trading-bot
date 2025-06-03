@@ -369,6 +369,11 @@ def main():
         fig_risk = advanced_viz.plot_risk_metrics_dashboard()
         st.plotly_chart(fig_risk, use_container_width=True, key="risk_metrics")
         
+        # Confidence Score Breakdown
+        st.header("🎯 Confidence Score Analysis")
+        fig_confidence = advanced_viz.plot_confidence_breakdown()
+        st.plotly_chart(fig_confidence, use_container_width=True, key="confidence_breakdown")
+        
         # Trade analysis
         st.header("📊 Trade Analysis")
         
@@ -383,6 +388,7 @@ def main():
                     'Credit': f"${trade.entry_credit:.2f}",
                     'P&L': f"${trade.realized_pnl:.2f}",
                     'Days': trade.days_in_trade,
+                    'Confidence': f"{getattr(trade, 'confidence_score', 0)}%",
                     'Exit': trade.exit_reason if trade.exit_reason else "Open"
                 }
                 for trade in results.trades
