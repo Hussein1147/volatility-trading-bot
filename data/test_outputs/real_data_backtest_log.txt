@@ -1,0 +1,20 @@
+=== REAL DATA BACKTEST LOG ===
+
+Date range: 2024-11-01 to 2024-11-08
+Symbols: ['SPY', 'QQQ']
+
+[2025-06-02 23:27:07.702331] INFO: Starting backtest from 2024-11-01 to 2024-11-08
+[2025-06-02 23:27:07.702339] INFO: Symbols: SPY, QQQ
+[2025-06-02 23:27:07.702346] INFO: Initial capital: $10,000.00
+[2025-06-02 23:27:07.702355] INFO: Total trading days to process: 6
+[2025-06-02 23:27:07.702615] INFO: Initialized Alpaca data fetcher (real data from 2024-02-01 onwards)
+[2025-06-02 23:27:07.959679] WARNING: Error fetching real data for SPY on 2024-11-05: 'MultiIndex' object has no attribute 'date'
+[2025-06-02 23:27:08.022151] WARNING: Error fetching real data for QQQ on 2024-11-05: 'MultiIndex' object has no attribute 'date'
+[2025-06-02 23:27:08.121046] WARNING: Error fetching real data for QQQ on 2024-11-06: 'MultiIndex' object has no attribute 'date'
+[2025-06-02 23:27:08.219653] WARNING: Error fetching real data for QQQ on 2024-11-07: 'MultiIndex' object has no attribute 'date'
+[2025-06-02 23:27:08.284192] INFO: Closing all remaining positions at end of backtest
+[2025-06-02 23:27:08.284225] INFO: Backtest completed! Total P&L: $0.00
+
+
+Total entries: 11
+Using real data: True

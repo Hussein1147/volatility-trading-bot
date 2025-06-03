@@ -1,0 +1,47 @@
+=== DETAILED ACTIVITY LOG ===
+
+1. [2025-06-02 23:22:46.833533] INFO: Starting backtest from 2025-05-28 to 2025-06-02
+2. [2025-06-02 23:22:46.833544] INFO: Symbols: SPY, QQQ
+3. [2025-06-02 23:22:46.833551] INFO: Initial capital: $10,000.00
+4. [2025-06-02 23:22:46.833559] INFO: Total trading days to process: 4
+5. [2025-06-02 23:22:46.833685] INFO: Market data for SPY: -2.00% move, IV Rank: 72.1
+6. [2025-06-02 23:22:46.833696] INFO: Volatility spike detected in SPY: -2.00%
+7. [2025-06-02 23:22:46.833700] INFO: Sending SPY to Claude AI for analysis...
+8. [2025-06-02 23:22:53.616738] INFO: Claude recommends: call_credit spread for SPY
+9. [2025-06-02 23:22:53.616813] TRADE: OPENED: SPY call_credit 100.5/101.5 x2 for $70.00 credit
+   Details: {'trade_id': 'SPY_20250528_232246', 'max_loss': 130.0}
+10. [2025-06-02 23:22:53.616863] INFO: No significant move in QQQ on 2025-05-28
+11. [2025-06-02 23:22:53.617143] INFO: Market data for SPY: 2.50% move, IV Rank: 75.6
+12. [2025-06-02 23:22:53.617169] INFO: Volatility spike detected in SPY: 2.50%
+13. [2025-06-02 23:22:53.617179] INFO: Sending SPY to Claude AI for analysis...
+14. [2025-06-02 23:23:00.967703] INFO: Claude recommends: put_credit spread for SPY
+15. [2025-06-02 23:23:00.967795] TRADE: OPENED: SPY put_credit 98.0/97.0 x2 for $50.00 credit
+   Details: {'trade_id': 'SPY_20250529_232246', 'max_loss': 150.0}
+16. [2025-06-02 23:23:00.967995] INFO: Market data for QQQ: -2.00% move, IV Rank: 94.6
+17. [2025-06-02 23:23:00.968032] INFO: Volatility spike detected in QQQ: -2.00%
+18. [2025-06-02 23:23:00.968045] INFO: Sending QQQ to Claude AI for analysis...
+19. [2025-06-02 23:23:08.721009] INFO: Claude recommends: call_credit spread for QQQ
+20. [2025-06-02 23:23:08.721038] WARNING: Trade rejected: Max loss $220.00 exceeds risk limit
+21. [2025-06-02 23:23:08.721141] INFO: Market data for SPY: 2.00% move, IV Rank: 85.6
+22. [2025-06-02 23:23:08.721176] INFO: Volatility spike detected in SPY: 2.00%
+23. [2025-06-02 23:23:08.721183] INFO: Sending SPY to Claude AI for analysis...
+24. [2025-06-02 23:23:15.096498] INFO: Claude recommends: put_credit spread for SPY
+25. [2025-06-02 23:23:15.096539] TRADE: OPENED: SPY put_credit 98.0/97.0 x2 for $50.00 credit
+   Details: {'trade_id': 'SPY_20250530_232246', 'max_loss': 150.0}
+26. [2025-06-02 23:23:15.096635] INFO: Market data for QQQ: 3.00% move, IV Rank: 94.5
+27. [2025-06-02 23:23:15.096658] INFO: Volatility spike detected in QQQ: 3.00%
+28. [2025-06-02 23:23:15.096667] INFO: Sending QQQ to Claude AI for analysis...
+29. [2025-06-02 23:23:15.096678] WARNING: Rate limit reached, waiting 32.7 seconds...
+30. [2025-06-02 23:23:54.752840] INFO: Claude recommends: put_credit spread for QQQ
+31. [2025-06-02 23:23:54.752880] TRADE: OPENED: QQQ put_credit 95.0/94.0 x2 for $50.00 credit
+   Details: {'trade_id': 'QQQ_20250530_232246', 'max_loss': 150.0}
+32. [2025-06-02 23:23:54.752990] INFO: Market data for SPY: -2.50% move, IV Rank: 74.4
+33. [2025-06-02 23:23:54.753009] INFO: Volatility spike detected in SPY: -2.50%
+34. [2025-06-02 23:23:54.753017] INFO: Sending SPY to Claude AI for analysis...
+35. [2025-06-02 23:24:00.894069] INFO: Claude recommends: call_credit spread for SPY
+36. [2025-06-02 23:24:00.894088] WARNING: Trade rejected: Max loss $405.00 exceeds risk limit
+37. [2025-06-02 23:24:00.894102] INFO: No significant move in QQQ on 2025-06-02
+38. [2025-06-02 23:24:00.894127] INFO: Closing all remaining positions at end of backtest
+39. [2025-06-02 23:24:00.894309] INFO: Backtest completed! Total P&L: $99.60
+
+Total entries: 39
