@@ -15,8 +15,12 @@ from alpaca.data.requests import (
     OptionLatestQuoteRequest, OptionTradesRequest
 )
 from alpaca.data.timeframe import TimeFrame
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
 
 class AlpacaDataFetcher:
     """Fetch historical options data from Alpaca for backtesting
@@ -30,8 +34,9 @@ class AlpacaDataFetcher:
     
     def __init__(self):
         # Initialize Alpaca clients
-        api_key = os.getenv('ALPACA_API_KEY')
-        secret_key = os.getenv('ALPACA_SECRET_KEY')
+        # Use paper trading keys if available, otherwise fall back to regular keys
+        api_key = os.getenv('ALPACA_API_KEY_PAPER_TRADING') or os.getenv('ALPACA_API_KEY')
+        secret_key = os.getenv('ALPACA_SECRET_KEY_PAPER_TRADING') or os.getenv('ALPACA_SECRET_KEY')
         
         self.stock_client = StockHistoricalDataClient(api_key, secret_key)
         
@@ -236,26 +241,69 @@ class AlpacaDataFetcher:
             return {}
             
         # Calculate various volatility metrics
-        current_date_data = df[df.index.date == date.date()]
+        # Handle MultiIndex by resetting and filtering
+        df_reset = df.reset_index()
+        if 'symbol' in df_reset.columns:
+            df_reset = df_reset[df_reset['symbol'] == symbol]
+        
+        # Convert timestamp to date for filtering
+        df_reset['date'] = pd.to_datetime(df_reset['timestamp']).dt.date
+        current_date_data = df_reset[df_reset['date'] == date.date()]
+        
         if current_date_data.empty:
             return {}
             
         # Get realized volatility over different periods
-        hv_10 = df['daily_return'].tail(10).std() * np.sqrt(252) * 100
-        hv_20 = df['daily_return'].tail(20).std() * np.sqrt(252) * 100
-        hv_30 = df['daily_return'].tail(30).std() * np.sqrt(252) * 100
+        returns = df_reset['daily_return'].dropna()
         
-        # Calculate IV rank and percentile (using HV as proxy)
-        all_hv_20 = df['realized_vol'].dropna()
-        current_hv = hv_20
-        
-        if len(all_hv_20) > 0:
-            iv_rank = ((current_hv - all_hv_20.min()) / 
-                      (all_hv_20.max() - all_hv_20.min()) * 100)
-            iv_percentile = (all_hv_20 < current_hv).sum() / len(all_hv_20) * 100
+        if len(returns) >= 10:
+            hv_10 = returns.tail(10).std() * np.sqrt(252) * 100
         else:
-            iv_rank = 50
-            iv_percentile = 50
+            hv_10 = 20  # Default
+            
+        if len(returns) >= 20:
+            hv_20 = returns.tail(20).std() * np.sqrt(252) * 100
+        else:
+            hv_20 = 20  # Default
+            
+        if len(returns) >= 30:
+            hv_30 = returns.tail(30).std() * np.sqrt(252) * 100
+        else:
+            hv_30 = 20  # Default
+        
+        # Calculate IV rank using rolling 20-day volatilities
+        if len(returns) >= 252:  # Need at least a year of data
+            rolling_vols = []
+            for i in range(20, len(returns)):
+                vol = returns.iloc[i-20:i].std() * np.sqrt(252) * 100
+                rolling_vols.append(vol)
+            
+            rolling_vols = np.array(rolling_vols)
+            current_hv = hv_20
+            
+            # IV Rank calculation
+            min_vol = rolling_vols.min()
+            max_vol = rolling_vols.max()
+            
+            if max_vol > min_vol:
+                iv_rank = ((current_hv - min_vol) / (max_vol - min_vol)) * 100
+                iv_percentile = (rolling_vols < current_hv).sum() / len(rolling_vols) * 100
+            else:
+                iv_rank = 50
+                iv_percentile = 50
+        else:
+            # Not enough data - use simulated IV rank based on move size
+            move_size = abs(current_date_data['percent_change'].iloc[0])
+            if move_size > 2.0:
+                iv_rank = 80 + np.random.uniform(-10, 10)
+            elif move_size > 1.5:
+                iv_rank = 70 + np.random.uniform(-10, 10)
+            elif move_size > 1.0:
+                iv_rank = 60 + np.random.uniform(-10, 10)
+            else:
+                iv_rank = 50 + np.random.uniform(-10, 10)
+            
+            iv_percentile = iv_rank + np.random.uniform(-5, 5)
             
         return {
             'date': date,
