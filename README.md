@@ -1,101 +1,65 @@
 # Volatility Trading Bot
 
-An automated volatility trading bot that uses Alpaca's API and Claude AI for analyzing market conditions and executing credit spread strategies.
-
-## Strategy Overview
-
-This bot implements a two-phase volatility trading strategy:
-
-**Phase 1 - Volatility Spike**: When significant market moves occur (>1.5%), the bot:
-- Sells call credit spreads on market drops
-- Sells put credit spreads on market rallies
-- Targets strikes 1.25-1.75 standard deviations from current price
-
-**Phase 2 - Volatility Contraction**: After volatility spike settles:
-- Adds butterfly spreads or opposite-side credit spreads
-- Captures volatility mean reversion
+An automated options trading bot that uses Claude AI to identify and execute credit spread strategies during market volatility spikes.
 
 ## Features
 
-- ✅ Real-time market scanning for SPY, QQQ, IWM, DIA
-- ✅ IV rank/percentile calculation for volatility detection
-- ✅ Claude AI integration for intelligent trade analysis
-- ✅ Paper trading with Alpaca (commission-free)
-- ✅ Automatic position monitoring and profit targets
-- ✅ Risk management (2% max risk per trade)
-- ✅ Two-phase strategy implementation
+- **Real-time Market Monitoring**: Continuously scans major ETFs (SPY, QQQ, IWM, DIA) for volatility events
+- **AI-Powered Analysis**: Uses Claude Sonnet 4 to analyze market conditions and make trading decisions
+- **Automated Execution**: Executes credit spreads through Alpaca Trading API
+- **Risk Management**: Built-in position monitoring with profit targets and stop losses
+- **Backtesting**: Comprehensive backtesting framework with real historical data
+- **Dual Dashboard System**: 
+  - Main trading dashboard for live monitoring and control
+  - Separate backtesting dashboard for strategy analysis
 
-## Setup Instructions
+## Quick Start
 
-### 1. Prerequisites
+### Prerequisites
 
-- Python 3.8 or higher
-- Alpaca paper trading account (free at [alpaca.markets](https://alpaca.markets))
-- Anthropic API key for Claude AI
+- Python 3.8+
+- Alpaca Trading Account (paper or live)
+- Anthropic API Key (for Claude AI)
+- Virtual environment (recommended)
 
-### 2. Installation
+### Installation
 
+1. Clone the repository:
 ```bash
-# Clone the repository
 git clone https://github.com/Hussein1147/volatility-trading-bot.git
 cd volatility-trading-bot
+```
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+2. Create and activate virtual environment:
+```bash
+python -m venv trading_bot_env
+source trading_bot_env/bin/activate  # On Windows: trading_bot_env\Scripts\activate
+```
 
-# Install dependencies
+3. Install dependencies:
+```bash
 pip install -r requirements.txt
 ```
 
-### 3. API Setup
-
-#### Alpaca Setup:
-1. Go to [alpaca.markets](https://alpaca.markets) and create a free account
-2. Navigate to "Paper Trading" in the dashboard
-3. Generate API keys (API Key ID and Secret Key)
-4. Note: Paper accounts automatically get Level 3 options approval
-
-#### Claude API Setup:
-1. Go to [console.anthropic.com](https://console.anthropic.com)
-2. Create an account and generate an API key
-3. You'll get $5 free credits to start
-
-### 4. Environment Configuration
-
+4. Set up environment variables:
 ```bash
-# Copy the template
 cp .env.template .env
-
 # Edit .env with your API keys
-ALPACA_API_KEY=your_alpaca_api_key_here
-ALPACA_SECRET_KEY=your_alpaca_secret_key_here
-ANTHROPIC_API_KEY=your_claude_api_key_here
 ```
 
-### 5. Running the Bot
+### Running the Bot
 
-#### Run the Dashboard (Recommended):
+#### Main Trading Dashboard
 ```bash
 python run_dashboard.py
+# Access at http://localhost:8501
 ```
 
-This opens a Streamlit dashboard at http://localhost:8501 with:
-- Real-time position monitoring
-- P&L tracking
-- Trade history
-- Claude AI analysis logs
-
-#### Run the Bot Directly:
+#### Backtesting Dashboard
 ```bash
-python -m src.core.volatility_bot
+python run_backtest.py
+# Access at http://localhost:8502
 ```
-
-The bot will:
-- Verify your API connections
-- Start monitoring market conditions during trading hours (9:30 AM - 4:00 PM ET)
-- Log all analysis and trades to console
-- Execute paper trades when opportunities are found
 
 ## Project Structure
 
@@ -104,135 +68,132 @@ volatility-trading-bot/
 ├── src/
 │   ├── core/           # Core trading logic
 │   │   ├── trade_manager.py      # Trade execution and management
-│   │   ├── position_tracker.py   # Position monitoring
-│   │   └── volatility_bot.py     # Main bot logic
+│   │   ├── volatility_bot.py     # Main bot logic
+│   │   └── position_tracker.py   # Position monitoring
 │   ├── data/           # Data management
-│   │   ├── trade_db.py          # Trade history database
-│   │   ├── simulated_pnl.py     # P&L simulation for dev mode
-│   │   └── database.py          # PostgreSQL models (optional)
-│   └── ui/             # User interface
-│       └── dashboard.py         # Streamlit dashboard
-├── deployment/         # Deployment configurations
-├── docs/              # Documentation
-├── scripts/           # Utility scripts
-├── requirements.txt   # Python dependencies
-├── run_dashboard.py   # Dashboard entry point
-└── README.md         # This file
+│   │   ├── trade_db.py          # SQLite database interface
+│   │   ├── simulated_pnl.py     # P&L tracking for dev mode
+│   │   └── database.py          # PostgreSQL models (for deployment)
+│   ├── ui/             # User interfaces
+│   │   ├── dashboard.py         # Main trading dashboard
+│   │   └── backtest_dashboard.py # Backtesting interface
+│   └── backtest/       # Backtesting framework
+│       ├── backtest_engine.py   # Core backtesting logic
+│       ├── data_fetcher.py      # Historical data retrieval
+│       └── visualizer.py        # Results visualization
+├── scripts/            # Utility scripts
+│   ├── verify_system.py         # System verification tool
+│   └── tests/                   # Test scripts
+├── tests/              # Unit tests
+├── docs/               # Documentation
+└── requirements.txt    # Python dependencies
 ```
 
-## Trading Parameters
+## Trading Strategy
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| Account Size | $10,000 | Simulated within paper account |
-| Max Risk/Trade | 2% ($200) | Maximum loss per position |
-| Profit Target | 35% | Percentage of max profit to close |
-| Min Price Move | 1.5% | Threshold to trigger analysis |
-| Min IV Rank | 70 | Minimum implied volatility rank |
-| Symbols | SPY, QQQ, IWM, DIA | ETFs monitored |
-| DTE Range | 7-45 days | Days to expiration target |
+The bot implements a volatility-based credit spread strategy:
 
-## Strategy Logic
+1. **Signal Detection**: Monitors for price moves > 1.5% with IV rank > 70
+2. **Direction Analysis**: 
+   - Big move DOWN → Sell CALL credit spreads
+   - Big move UP → Sell PUT credit spreads
+3. **Strike Selection**: 1.5-2 standard deviations from current price
+4. **Expiration**: 14-30 DTE for optimal theta decay
+5. **Risk Management**: 
+   - Profit target: 35% of max profit
+   - Stop loss: 100% of credit received
+   - Time stop: Exit if < 7 DTE
 
-### Entry Criteria
-- Significant price move (≥1.5%) detected
-- High IV rank (≥70) indicating elevated volatility
-- Claude AI confirms trade setup with ≥70% confidence
+## Configuration
 
-### Position Sizing
-- Calculate contracts based on $200 max risk
-- Ensure adequate buying power available
-- Account for spread width and premium received
+### Bot Settings (via Dashboard)
 
-### Exit Strategy
-- Close at 35% of maximum profit potential
-- Monitor positions every 5 minutes during market hours
-- Implement stop-loss if unrealized loss exceeds threshold
+- **Symbols**: ETFs to monitor
+- **Min Price Move**: Minimum % move to trigger analysis (default: 1.5%)
+- **Min IV Rank**: Minimum implied volatility rank (default: 70)
+- **Confidence Threshold**: Claude's minimum confidence to trade (default: 70%)
+- **Scan Interval**: Time between market scans (default: 300 seconds)
 
-## File Structure
+### Risk Parameters
 
+- **Profit Target**: % of max profit to close (default: 35%)
+- **Stop Loss**: % loss to exit (default: 100%)
+- **Time Stop**: Days to expiration to close (default: 7)
+- **Max Daily Loss**: Maximum allowed daily loss
+
+## Development Mode
+
+The bot includes a development mode for testing without real trades:
+
+- Simulated market data generation
+- Full trade execution flow without broker submission
+- Realistic P&L tracking with time decay
+- Same Claude AI analysis as live mode
+
+Toggle via the dashboard checkbox.
+
+## Backtesting
+
+The backtesting framework allows you to test strategies on historical data:
+
+- **Real Data**: Uses actual Alpaca stock prices
+- **Options Data**: Real data from Feb 2024+, simulated for earlier dates
+- **Performance Metrics**: Sharpe ratio, max drawdown, win rate, etc.
+- **Visualization**: Equity curves, trade analysis, monthly returns
+
+### Running a Backtest
+
+1. Launch the backtesting dashboard
+2. Configure parameters in the sidebar
+3. Click "Run Backtest"
+4. Analyze results across multiple tabs
+
+## System Verification
+
+Run the verification script to ensure everything is configured correctly:
+
+```bash
+python scripts/verify_system.py
 ```
-volatility-trading-bot/
-├── volatility_bot.py      # Main bot implementation
-├── requirements.txt       # Python dependencies
-├── .env.template         # Environment variables template
-├── .gitignore           # Git ignore patterns
-└── README.md            # This documentation
-```
 
-## Current Implementation Status
+This checks:
+- API connectivity
+- Database setup
+- Dependencies
+- Dashboard accessibility
 
-### ✅ Completed Features:
-- Market data fetching and analysis
-- IV rank/percentile calculation
-- Claude AI integration for trade decisions
-- Paper trading framework
-- Position monitoring structure
-- Risk management parameters
+## API Documentation
 
-### 🚧 Development Roadmap:
-- [ ] Real options chain data integration
-- [ ] Actual options order execution (currently simulation)
-- [ ] Options symbol formatting (OCC standard)
-- [ ] Profit target automation
-- [ ] Discord/email alert system
-- [ ] Performance tracking dashboard
-- [ ] Backtesting framework
+### Data Sources
 
-## Risk Disclaimers
+- **Stock Data**: Alpaca Markets (real-time and historical)
+- **Options Data**: Alpaca Markets (Feb 2024 onwards)
+- **AI Analysis**: Anthropic Claude Sonnet 4
 
-⚠️ **Important Risk Warnings:**
+### Database
 
-- This is educational software for learning algorithmic trading
-- All trades are executed in paper trading mode only
-- Past performance does not guarantee future results
-- Options trading involves substantial risk of loss
-- Never trade with money you cannot afford to lose
-- Always paper trade strategies before using real money
+The bot uses SQLite for local storage with tables for:
+- Trade history
+- Claude analyses
+- Market scans
+- Bot logs
 
-## Troubleshooting
+## Deployment
 
-### Common Issues:
-
-**"ModuleNotFoundError"**
-- Ensure virtual environment is activated
-- Run `pip install -r requirements.txt`
-
-**"Invalid API credentials"**
-- Verify API keys in .env file
-- Ensure Alpaca keys are for paper trading
-- Check that Claude API key is valid
-
-**"No market data"**
-- Bot only runs during market hours (9:30 AM - 4:00 PM ET)
-- Check internet connection
-- Verify Alpaca account has data permissions
-
-**"No trades executed"**
-- Market conditions may not meet criteria (IV rank, price moves)
-- Lower min_iv_rank or min_price_move for testing
-- Check logs for Claude analysis results
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for cloud deployment instructions.
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/new-feature`)
-3. Commit your changes (`git commit -am 'Add new feature'`)
-4. Push to the branch (`git push origin feature/new-feature`)
-5. Create a Pull Request
+2. Create a feature branch
+3. Make your changes
+4. Run tests
+5. Submit a pull request
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see LICENSE file for details.
 
-## Support
+## Disclaimer
 
-For questions or issues:
-- Open an issue on GitHub
-- Check the troubleshooting section above
-- Review Alpaca API documentation: [alpaca.markets/docs](https://alpaca.markets/docs)
-- Review Anthropic API documentation: [docs.anthropic.com](https://docs.anthropic.com)
-
----
-
-**Disclaimer**: This software is for educational purposes only. Trading involves significant financial risk. Always consult with a financial advisor before making investment decisions.
+This bot is for educational purposes. Trading options involves substantial risk of loss. Past performance does not guarantee future results. Always test thoroughly with paper trading before using real money.
