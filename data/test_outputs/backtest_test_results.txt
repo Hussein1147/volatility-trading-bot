@@ -1,0 +1,15 @@
+=== BACKTEST TEST RESULTS ===
+
+Date: 2025-06-02 23:00:14.701229
+Config: BacktestConfig(start_date=datetime.datetime(2025, 5, 26, 23, 0, 14, 678905), end_date=datetime.datetime(2025, 6, 2, 23, 0, 14, 678912), symbols=['SPY'], initial_capital=10000, max_risk_per_trade=0.02, min_iv_rank=70, min_price_move=1.5, confidence_threshold=70, commission_per_contract=0.65, use_real_data=True)
+
+Results:
+BacktestResults(total_trades=0, winning_trades=0, losing_trades=0, total_pnl=0, gross_profit=0, gross_loss=0, max_drawdown=0, max_drawdown_pct=0, sharpe_ratio=0, profit_factor=0, win_rate=0, avg_win=0, avg_loss=0, avg_days_in_trade=0, trades=[], equity_curve=[10000, 10000, 10000, 10000, 10000, 10000, 10000], daily_returns=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+Activity Log (6 entries):
+  [2025-06-02 23:00:14.701013] info: Starting backtest from 2025-05-26 to 2025-06-02
+  [2025-06-02 23:00:14.701020] info: Symbols: SPY
+  [2025-06-02 23:00:14.701027] info: Initial capital: $10,000.00
+  [2025-06-02 23:00:14.701036] info: Total trading days to process: 6
+  [2025-06-02 23:00:14.701087] info: Closing all remaining positions at end of backtest
+  [2025-06-02 23:00:14.701091] info: Backtest completed! Total P&L: $0.00

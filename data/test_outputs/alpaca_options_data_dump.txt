@@ -1,0 +1,108 @@
+=== ALPACA OPTIONS DATA TEST ===
+Timestamp: 2025-06-02 23:06:10.460055
+Environment: Paper Trading
+
+
+==================================================
+SYMBOL: SPY
+==================================================
+
+Fetching options contracts from 2025-06-03 to 2025-07-02
+Total contracts found: 100
+
+First contract type: <class 'alpaca.trading.models.OptionContract'>
+First contract attributes: dict_keys(['id', 'symbol', 'name', 'status', 'tradable', 'expiration_date', 'root_symbol', 'underlying_symbol', 'underlying_asset_id', 'type', 'style', 'strike_price', 'size', 'open_interest', 'open_interest_date', 'close_price', 'close_price_date'])
+
+
+Expiration: 2025-06-03
+Calls: 100, Puts: 0
+
+Sample CALL contracts:
+  SPY250603C00350000: Strike $350.0, Open Interest: None, Close: $N/A
+  SPY250603C00355000: Strike $355.0, Open Interest: None, Close: $N/A
+  SPY250603C00360000: Strike $360.0, Open Interest: None, Close: $N/A
+  SPY250603C00365000: Strike $365.0, Open Interest: None, Close: $N/A
+  SPY250603C00370000: Strike $370.0, Open Interest: None, Close: $N/A
+
+Sample PUT contracts:
+
+
+Fetching quotes for sample contracts...
+
+SPY250603C00350000:
+  Type: ContractType.CALL
+  Strike: $350.0
+  Expiry: 2025-06-03
+  Bid: $241.6 x 30.0
+  Ask: $243.97 x 1.0
+  Mid: $242.78
+
+SPY250603C00355000:
+  Type: ContractType.CALL
+  Strike: $355.0
+  Expiry: 2025-06-03
+  Bid: $236.62 x 30.0
+  Ask: $238.7 x 30.0
+  Mid: $237.66
+
+SPY250603C00360000:
+  Type: ContractType.CALL
+  Strike: $360.0
+  Expiry: 2025-06-03
+  Bid: $231.6 x 30.0
+  Ask: $233.7 x 1.0
+  Mid: $232.65
+
+==================================================
+SYMBOL: QQQ
+==================================================
+
+Fetching options contracts from 2025-06-03 to 2025-07-02
+Total contracts found: 100
+
+First contract type: <class 'alpaca.trading.models.OptionContract'>
+First contract attributes: dict_keys(['id', 'symbol', 'name', 'status', 'tradable', 'expiration_date', 'root_symbol', 'underlying_symbol', 'underlying_asset_id', 'type', 'style', 'strike_price', 'size', 'open_interest', 'open_interest_date', 'close_price', 'close_price_date'])
+
+
+Expiration: 2025-06-03
+Calls: 100, Puts: 0
+
+Sample CALL contracts:
+  QQQ250603C00400000: Strike $400.0, Open Interest: 2, Close: $118.5
+  QQQ250603C00405000: Strike $405.0, Open Interest: None, Close: $N/A
+  QQQ250603C00410000: Strike $410.0, Open Interest: None, Close: $108.67
+  QQQ250603C00415000: Strike $415.0, Open Interest: None, Close: $N/A
+  QQQ250603C00420000: Strike $420.0, Open Interest: None, Close: $N/A
+
+Sample PUT contracts:
+
+
+Fetching quotes for sample contracts...
+
+QQQ250603C00400000:
+  Type: ContractType.CALL
+  Strike: $400.0
+  Expiry: 2025-06-03
+  Bid: $121.14 x 1.0
+  Ask: $124.91 x 1.0
+  Mid: $123.03
+
+QQQ250603C00405000:
+  Type: ContractType.CALL
+  Strike: $405.0
+  Expiry: 2025-06-03
+  Bid: $116.14 x 1.0
+  Ask: $119.74 x 47.0
+  Mid: $117.94
+
+QQQ250603C00410000:
+  Type: ContractType.CALL
+  Strike: $410.0
+  Expiry: 2025-06-03
+  Bid: $111.14 x 1.0
+  Ask: $114.74 x 47.0
+  Mid: $112.94
+
+
+=== TEST COMPLETE ===
+Data saved to: alpaca_options_data_dump.txt
