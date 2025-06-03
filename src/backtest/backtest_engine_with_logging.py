@@ -16,6 +16,8 @@ import os
 
 from src.core.trade_manager import EnhancedTradeManager, TradeManagementRules, OptionContract
 from anthropic import AsyncAnthropic
+from src.backtest.realistic_iv_simulator import RealisticIVSimulator
+from src.backtest.tastytrade_api import TastyTradeDataFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,18 @@ class BacktestEngineWithLogging:
         # Progress tracking
         self.total_days = 0
         self.current_day = 0
+        
+        # IV simulator and TastyTrade fetcher
+        self.iv_simulator = RealisticIVSimulator()
+        self.tastytrade_fetcher = None  # Initialize on first use
+        
+        # Check if TastyTrade credentials are available
+        if os.getenv('TASTYTRADE_USERNAME') and os.getenv('TASTYTRADE_PASSWORD'):
+            self.use_tastytrade = True
+            self.log_activity("info", "TastyTrade credentials found - will use real IV data")
+        else:
+            self.use_tastytrade = False
+            self.log_activity("info", "No TastyTrade credentials - using simulated IV data")
         
     def log_activity(self, type: str, message: str, details: Optional[Dict] = None):
         """Log an activity"""
@@ -131,8 +145,6 @@ class BacktestEngineWithLogging:
         for symbol in self.config.symbols:
             market_data = await self._get_historical_data(symbol, date)
             if market_data:
-                self.log_activity("info", f"Volatility spike detected in {symbol}: {market_data['percent_change']:.2f}%")
-                
                 signal = await self._analyze_opportunity(symbol, market_data, date)
                 if signal:
                     await self._execute_trade(signal, date)
@@ -150,24 +162,102 @@ class BacktestEngineWithLogging:
             self.results.daily_returns.append(daily_return)
             
     async def _get_historical_data(self, symbol: str, date: datetime) -> Optional[Dict]:
-        """Get historical market data"""
-        # Simulate volatility events
-        random_event = np.random.random()
-        if random_event < 0.05:  # 5% chance
-            percent_change = np.random.choice([-3, -2.5, -2, 2, 2.5, 3])
-            iv_rank = np.random.uniform(70, 95)
+        """Get historical market data from Alpaca"""
+        from src.backtest.data_fetcher import AlpacaDataFetcher
+        
+        if not hasattr(self, 'data_fetcher'):
+            self.data_fetcher = AlpacaDataFetcher()
+            self.log_activity("info", f"Initialized Alpaca data fetcher (real data from {self.data_fetcher.OPTIONS_DATA_START_DATE.date()} onwards)")
+        
+        # Get real stock data - need wider range for volatility calculation
+        start_date = date - timedelta(days=30)  # Need historical data for volatility
+        end_date = date + timedelta(days=1)
+        
+        try:
+            df = await self.data_fetcher.get_stock_data(symbol, start_date, end_date)
+            
+            if df.empty:
+                return None
+            
+            # Always reset index since Alpaca returns MultiIndex
+            df_reset = df.reset_index()
+            
+            # Filter for our symbol if multi-index includes symbol
+            if 'symbol' in df_reset.columns:
+                df_symbol = df_reset[df_reset['symbol'] == symbol]
+            else:
+                df_symbol = df_reset
+            
+            # Convert timestamp to date for filtering
+            df_symbol = df_symbol.copy()
+            df_symbol['date'] = pd.to_datetime(df_symbol['timestamp']).dt.date
+            day_data = df_symbol[df_symbol['date'] == date.date()]
+            
+            if day_data.empty:
+                return None
+                
+            day_data = day_data.iloc[0]
+            
+            # Calculate metrics
+            percent_change = day_data['percent_change']
+            
+            # Try to get real IV rank from TastyTrade first
+            iv_rank = None
+            
+            if self.use_tastytrade:
+                try:
+                    if not self.tastytrade_fetcher:
+                        self.tastytrade_fetcher = TastyTradeDataFetcher()
+                    
+                    # Get real IV rank
+                    real_iv_rank = await self.tastytrade_fetcher.get_iv_rank(symbol, date)
+                    
+                    if real_iv_rank is not None:
+                        iv_rank = real_iv_rank
+                        self.log_activity("info", f"Using real IV rank from TastyTrade: {iv_rank:.1f}")
+                except Exception as e:
+                    self.log_activity("warning", f"TastyTrade API error: {str(e)}")
+            
+            # Fall back to simulation if needed
+            if iv_rank is None:
+                # Get volume ratio for IV calculation
+                avg_volume = df_reset['volume'].rolling(20).mean().iloc[-1] if len(df_reset) > 20 else day_data['volume']
+                volume_ratio = day_data['volume'] / avg_volume if avg_volume > 0 else 1.0
+                
+                # Use realistic IV simulator
+                iv_sim = self.iv_simulator.calculate_iv_rank(
+                    symbol=symbol,
+                    date=date,
+                    price_move=percent_change,
+                    volume_ratio=volume_ratio
+                )
+                iv_rank = iv_sim['iv_rank']
+            
+            self.log_activity("info", f"Real data: {symbol} moved {percent_change:.2f}% on {date.date()}, IV Rank: {iv_rank:.1f}")
+            
+            # Check if it's a significant move
+            if abs(percent_change) < self.config.min_price_move:
+                return None
+            
+            # It's a volatility spike!
+            self.log_activity("info", f"Volatility spike detected in {symbol}: {percent_change:.2f}%")
             
             return {
                 'symbol': symbol,
                 'date': date,
-                'current_price': 100 * (1 + percent_change/100),
+                'current_price': float(day_data['close']),
                 'percent_change': percent_change,
-                'volume': np.random.randint(1000000, 5000000),
+                'volume': int(day_data['volume']),
                 'iv_rank': iv_rank,
-                'iv_percentile': iv_rank + 5
+                'iv_percentile': iv_rank + 5  # Simple estimate
             }
-        
-        return None
+            
+        except Exception as e:
+            self.log_activity("warning", f"Error fetching real data for {symbol} on {date.date()}: {str(e)}")
+            # Add debug info
+            import traceback
+            self.log_activity("warning", f"Traceback: {traceback.format_exc()}")
+            return None
         
     async def _wait_for_rate_limit(self):
         """Wait if necessary to avoid hitting rate limits"""
@@ -239,6 +329,12 @@ class BacktestEngineWithLogging:
         4. Use 14-30 DTE for best theta decay
         5. Position size based on max ${self.current_capital * self.config.max_risk_per_trade:.0f} risk
         
+        IMPORTANT POSITION SIZING:
+        - Max risk allowed: ${self.current_capital * self.config.max_risk_per_trade:.0f}
+        - For a $5 wide spread: Max loss = $500 per contract
+        - Therefore: Maximum contracts = {int(self.current_capital * self.config.max_risk_per_trade / 500)}
+        - Always use 1-2 contracts maximum to stay within risk limits
+        
         Provide analysis in JSON format:
         {{
             "should_trade": true/false,
@@ -282,14 +378,32 @@ class BacktestEngineWithLogging:
         # Calculate trade details
         spread_width = abs(analysis['long_strike'] - analysis['short_strike'])
         credit_per_contract = analysis['expected_credit']
-        contracts = analysis['contracts']
-        total_credit = credit_per_contract * contracts * 100
-        max_loss = (spread_width - credit_per_contract) * contracts * 100
+        suggested_contracts = analysis['contracts']
         
-        # Check capital
-        if max_loss > self.current_capital * self.config.max_risk_per_trade:
-            self.log_activity("warning", f"Trade rejected: Max loss ${max_loss:.2f} exceeds risk limit")
+        # Calculate max loss per contract
+        max_loss_per_contract = (spread_width - credit_per_contract) * 100
+        
+        # Calculate maximum contracts we can afford based on risk
+        max_risk_dollars = self.current_capital * self.config.max_risk_per_trade
+        max_contracts = int(max_risk_dollars / max_loss_per_contract) if max_loss_per_contract > 0 else 0
+        
+        # Use the lesser of suggested contracts or max affordable
+        contracts = min(suggested_contracts, max_contracts)
+        
+        if contracts == 0:
+            self.log_activity("warning", f"Trade rejected: Cannot afford even 1 contract within risk limit")
             return
+            
+        # Recalculate with actual contracts
+        total_credit = credit_per_contract * contracts * 100
+        max_loss = max_loss_per_contract * contracts
+        
+        # Double check
+        if max_loss > max_risk_dollars:
+            self.log_activity("warning", f"Trade rejected: Max loss ${max_loss:.2f} exceeds risk limit ${max_risk_dollars:.2f}")
+            return
+            
+        self.log_activity("info", f"Position sized to {contracts} contracts (max loss: ${max_loss:.2f})")
             
         # Create trade
         trade = self.BacktestTrade(
@@ -336,12 +450,12 @@ class BacktestEngineWithLogging:
             # Check exit conditions
             exit_reason = None
             
-            if current_pnl >= trade.max_profit * 0.35:
+            if current_pnl >= trade.entry_credit * 0.35:  # Take profit at 35% of credit
                 exit_reason = "Profit Target"
-            elif current_pnl <= -trade.entry_credit:
+            elif current_pnl <= -trade.entry_credit * 0.75:  # Stop loss at 75% of credit
                 exit_reason = "Stop Loss"
-                current_pnl = -trade.max_loss
-            elif days_in_trade >= 23:
+                current_pnl = -trade.entry_credit * 0.75
+            elif days_in_trade >= 21:  # Close at 21 DTE
                 exit_reason = "Time Stop"
                 
             if exit_reason:
@@ -349,6 +463,10 @@ class BacktestEngineWithLogging:
                 trade.exit_reason = exit_reason
                 trade.realized_pnl = current_pnl - (self.config.commission_per_contract * trade.contracts * 2)
                 trade.days_in_trade = days_in_trade
+                
+                # Ensure we have all required attributes
+                if not hasattr(trade, 'spread_type'):
+                    trade.spread_type = 'credit_spread'
                 positions_to_close.append(trade_id)
                 
                 self.log_activity("trade",
@@ -377,10 +495,25 @@ class BacktestEngineWithLogging:
             trade.exit_time = date
             trade.exit_reason = "Backtest End"
             trade.days_in_trade = (date - trade.entry_time).days
+            # Assume we can close at 50% of credit for positions still open
             trade.realized_pnl = trade.entry_credit * 0.5 - (self.config.commission_per_contract * trade.contracts * 2)
+            
+            self.log_activity("trade",
+                f"CLOSED: {trade.symbol} {trade.spread_type} - Backtest End - P&L: ${trade.realized_pnl:.2f}",
+                {"trade_id": trade_id, "days_in_trade": trade.days_in_trade}
+            )
             
             self.results.trades.append(trade)
             self.current_capital += trade.realized_pnl
+            
+            # Update results metrics
+            self.results.total_trades += 1
+            if trade.realized_pnl > 0:
+                self.results.winning_trades += 1
+                self.results.gross_profit += trade.realized_pnl
+            else:
+                self.results.losing_trades += 1
+                self.results.gross_loss += abs(trade.realized_pnl)
             
         self.open_positions.clear()
         
