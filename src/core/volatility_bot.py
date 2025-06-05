@@ -30,15 +30,24 @@ import uvicorn
 # Database integration
 from src.data.database import DatabaseManager, Trade, MarketSnapshot, PerformanceMetric
 
+# Position sizing
+from src.core.position_sizer import DynamicPositionSizer
+
+# Strike selection
+from src.core.strike_selector import DeltaStrikeSelector
+
 # Load environment variables
 load_dotenv()
 
 # Configure logging
+log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
+os.makedirs(log_dir, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/app/logs/bot.log'),
+        logging.FileHandler(os.path.join(log_dir, 'bot.log')),
         logging.StreamHandler()
     ]
 )
@@ -53,6 +62,8 @@ class MarketData:
     iv_rank: float
     iv_percentile: float
     high_iv_strikes: List[Tuple[float, float]]  # (strike, iv) pairs
+    sma_20: Optional[float] = None
+    rsi_14: Optional[float] = None
     news_catalyst: Optional[str] = None
 
 @dataclass
@@ -143,18 +154,24 @@ class EnhancedAlpacaVolatilityBot:
         self.anthropic = AsyncAnthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
         
         # Trading parameters
-        self.symbols = ['SPY', 'QQQ', 'IWM', 'DIA']
+        self.symbols = ['SPY', 'QQQ', 'IWM', 'DIA', 'XLE', 'XLK']
         self.account_balance = 10000
-        self.max_risk_per_trade = 0.02  # 2% max risk
-        self.profit_target_percent = 0.35  # 35% of max profit
-        self.min_iv_rank = 70  # Minimum IV rank to consider
+        self.max_risk_per_trade = 0.02  # 2% max risk (will be overridden by dynamic sizing)
+        self.profit_target_percent = 0.50  # 50% of max profit (professional strategy)
+        self.min_iv_rank = 40  # Minimum IV rank to consider (lowered from 70 for professional strategy)
         self.min_price_move = 1.5  # Minimum % move to trigger
         self.active_trades = []
+        
+        # Initialize dynamic position sizer
+        self.position_sizer = DynamicPositionSizer(self.account_balance)
+        
+        # Initialize delta-based strike selector
+        self.strike_selector = DeltaStrikeSelector(target_delta=0.15)
         
         # Options parameters
         self.dte_min = 7
         self.dte_max = 45
-        self.delta_target_short = 0.20  # 20 delta for short strike
+        self.delta_target_short = 0.15  # 15 delta for short strike (professional strategy)
         
         # Bot state
         self.is_running = False
@@ -246,21 +263,51 @@ class EnhancedAlpacaVolatilityBot:
             quotes = self.data_client.get_stock_latest_quote(request)
             current_price = float(quotes[symbol].ask_price)
             
-            # Get today's bars for % change
-            today_request = StockBarsRequest(
+            # Get today's bars for % change and technical indicators
+            # Get 30 days of history for SMA and RSI calculation
+            history_request = StockBarsRequest(
                 symbol_or_symbols=symbol,
                 timeframe=TimeFrame.Day,
-                start=datetime.now().date()
+                start=datetime.now().date() - timedelta(days=30),
+                end=datetime.now().date()
             )
-            bars = self.data_client.get_stock_bars(today_request)
+            bars = self.data_client.get_stock_bars(history_request)
             
             if not bars.df.empty:
-                open_price = float(bars.df.iloc[0]['open'])
-                percent_change = ((current_price - open_price) / open_price) * 100
-                volume = int(bars.df.iloc[0]['volume'])
+                df = bars.df
+                # Get today's data
+                today_data = df.iloc[-1] if len(df) > 0 else None
+                if today_data is not None:
+                    open_price = float(today_data['open'])
+                    percent_change = ((current_price - open_price) / open_price) * 100
+                    volume = int(today_data['volume'])
+                    
+                    # Calculate technical indicators
+                    # SMA 20
+                    if len(df) >= 20:
+                        sma_20 = float(df['close'].tail(20).mean())
+                    else:
+                        sma_20 = float(df['close'].mean())
+                    
+                    # RSI 14
+                    if len(df) >= 14:
+                        delta = df['close'].diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                        rs = gain / loss
+                        rsi_14 = float(100 - (100 / (1 + rs.iloc[-1])))
+                    else:
+                        rsi_14 = 50.0  # Default neutral RSI
+                else:
+                    percent_change = 0
+                    volume = 0
+                    sma_20 = current_price
+                    rsi_14 = 50.0
             else:
                 percent_change = 0
                 volume = 0
+                sma_20 = current_price
+                rsi_14 = 50.0
             
             # Calculate IV metrics
             iv_rank, iv_percentile = await self.calculate_iv_metrics(symbol)
@@ -287,6 +334,8 @@ class EnhancedAlpacaVolatilityBot:
                     iv_rank=iv_rank,
                     iv_percentile=iv_percentile,
                     high_iv_strikes=[],  # Would populate with actual options data
+                    sma_20=sma_20,
+                    rsi_14=rsi_14,
                     news_catalyst="Market volatility event detected"
                 )
             
@@ -310,27 +359,52 @@ class EnhancedAlpacaVolatilityBot:
         IV Rank: {market_data.iv_rank:.1f}
         IV Percentile: {market_data.iv_percentile:.1f}
         
+        Technical Indicators:
+        20-day SMA: ${market_data.sma_20:.2f}
+        14-day RSI: {market_data.rsi_14:.1f}
+        Price vs SMA: {"Above" if market_data.current_price > market_data.sma_20 else "Below"} SMA
+        
         Account Balance: ${self.account_balance}
         Max Risk per Trade: {self.max_risk_per_trade * 100}%
         
+        IMPORTANT Directional Filter Rules:
+        - PUT CREDIT SPREADS: ONLY if price > SMA AND RSI > 50
+        - CALL CREDIT SPREADS: ONLY if price < SMA AND RSI < 50
+        - If conditions don't match, DO NOT TRADE
+        
         Strategy Rules:
-        1. If big move DOWN: Sell CALL credit spread above resistance
-        2. If big move UP: Sell PUT credit spread below support
-        3. Target 1.5-2 standard deviations from current price
-        4. Use 7-30 DTE for best theta decay
-        5. Position size based on max $200 risk
+        1. Check directional filters FIRST - if they don't match, set should_trade = false
+        2. If filters pass and big move DOWN: Sell CALL credit spread above resistance
+        3. If filters pass and big move UP: Sell PUT credit spread below support
+        4. Target 15 delta for short strike (approximately 85% probability of profit)
+        5. Use 40-50 DTE for primary book, 7-14 DTE only if IV Rank >= 80
+        6. Calculate confidence score based on multiple factors
+        
+        Confidence Scoring (start at 50, add/subtract):
+        - IV Rank 40-60: +5, 60-80: +10, 80+: +15
+        - Price move 1.5-2%: +5, 2-3%: +10, 3%+: +15
+        - Volume above average: +5
+        - Directional alignment strong: +10
+        - Strike distance good (1.5-2 SD): +10
+        - DTE in sweet spot (40-50): +5
+        - Subtract for risks: earnings nearby -10, major support/resistance breach -5
         
         Provide analysis in JSON format:
         {{
             "should_trade": true/false,
-            "spread_type": "call_credit" or "put_credit",
-            "short_strike": price,
-            "long_strike": price,
+            "spread_type": "call_credit" or "put_credit", 
             "expiration_days": number,
-            "contracts": number,
-            "expected_credit": amount per contract,
-            "probability_profit": percentage,
+            "volatility_estimate": decimal (e.g., 0.25 for 25% IV),
             "confidence": 0-100,
+            "confidence_factors": {{
+                "iv_rank_score": number,
+                "price_move_score": number,
+                "volume_score": number,
+                "directional_score": number,
+                "dte_score": number,
+                "risk_deductions": number,
+                "total": number
+            }},
             "reasoning": "explanation"
         }}
         """
@@ -345,22 +419,82 @@ class EnhancedAlpacaVolatilityBot:
             analysis = json.loads(response.content[0].text)
             
             if analysis['should_trade']:
+                # Use delta-based strike selection
+                expiration_days = analysis['expiration_days']
+                volatility = analysis.get('volatility_estimate', 0.25)  # Default 25% if not provided
+                
+                # Get strikes based on delta
+                short_strike, long_strike = self.strike_selector.select_spread_strikes(
+                    symbol=market_data.symbol,
+                    spot_price=market_data.current_price,
+                    spread_type=analysis['spread_type'],
+                    dte=expiration_days,
+                    volatility=volatility,
+                    spread_width=5.0  # Default $5 wide spreads
+                )
+                
                 # Calculate spread details
-                spread_width = abs(analysis['long_strike'] - analysis['short_strike'])
-                max_loss = (spread_width * 100 - analysis['expected_credit']) * analysis['contracts']
+                spread_width = abs(long_strike - short_strike)
+                
+                # Estimate credit (simplified - in reality would need option chain)
+                # Credit roughly = spread_width * 0.20 for 15 delta spreads
+                expected_credit_per_contract = spread_width * 0.20
+                max_loss_per_contract = (spread_width * 100) - expected_credit_per_contract
+                
+                # Calculate Greeks for the spread
+                spread_greeks = self.strike_selector.calculate_spread_greeks(
+                    spot_price=market_data.current_price,
+                    short_strike=short_strike,
+                    long_strike=long_strike,
+                    dte=expiration_days,
+                    volatility=volatility,
+                    spread_type=analysis['spread_type'],
+                    contracts=1
+                )
+                
+                # Determine book type based on DTE
+                if expiration_days >= 40:
+                    book_type = 'PRIMARY'
+                elif 7 <= expiration_days <= 14 and market_data.iv_rank >= 80:
+                    book_type = 'INCOME_POP'
+                else:
+                    book_type = 'PRIMARY'  # Default
+                
+                # Use dynamic position sizing based on confidence
+                position_size = self.position_sizer.calculate_position_size(
+                    confidence=analysis['confidence'],
+                    max_loss_per_contract=max_loss_per_contract,
+                    book_type=book_type,
+                    current_positions=self.active_trades
+                )
+                
+                # Check if we got any contracts
+                if position_size.contracts == 0:
+                    logger.warning(f"Position sizing returned 0 contracts for {market_data.symbol}")
+                    return None
+                
+                # Calculate actual values with sized position
+                total_credit = expected_credit_per_contract * position_size.contracts * 100
+                total_max_loss = position_size.total_max_loss
+                
+                # Store confidence factors if provided
+                confidence_breakdown = analysis.get('confidence_factors', {})
+                
+                # Calculate probability of profit from delta (rough approximation)
+                probability_profit = (1 - abs(spread_greeks['short_delta'])) * 100
                 
                 return CreditSpreadSignal(
                     symbol=market_data.symbol,
                     spread_type=analysis['spread_type'],
-                    short_strike=analysis['short_strike'],
-                    long_strike=analysis['long_strike'],
-                    expiration=(datetime.now() + timedelta(days=analysis['expiration_days'])).strftime('%Y-%m-%d'),
-                    contracts=analysis['contracts'],
-                    credit_received=analysis['expected_credit'] * analysis['contracts'],
-                    max_loss=max_loss,
-                    probability_profit=analysis['probability_profit'],
+                    short_strike=short_strike,
+                    long_strike=long_strike,
+                    expiration=(datetime.now() + timedelta(days=expiration_days)).strftime('%Y-%m-%d'),
+                    contracts=position_size.contracts,
+                    credit_received=total_credit,
+                    max_loss=total_max_loss,
+                    probability_profit=probability_profit,
                     confidence=analysis['confidence'],
-                    reasoning=analysis['reasoning']
+                    reasoning=f"{analysis['reasoning']} | Delta: {spread_greeks['short_delta']:.2f} | Risk: {position_size.confidence_tier} ({position_size.risk_percentage:.1%})"
                 )
                 
         except Exception as e:
