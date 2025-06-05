@@ -1,0 +1,40 @@
+Repository Reorganization Summary
+Date: 2025-06-04 18:00:55.202801
+Files moved: 33
+Errors: 0
+Backup location: backup_20250604_180055/
+
+File movements:
+  scripts/data_verification/test_alpaca_auth.py -> tests/integration/alpaca/test_alpaca_auth.py
+  scripts/data_verification/test_alpaca_options_data.py -> tests/integration/alpaca/test_alpaca_options_data.py
+  scripts/data_verification/test_alpaca_puts.py -> tests/integration/alpaca/test_alpaca_puts.py
+  scripts/tests/test_alpaca_data.py -> tests/integration/alpaca/test_alpaca_data.py
+  scripts/tests/test_alpaca_options.py -> tests/integration/alpaca/test_alpaca_options.py
+  scripts/verify_alpaca_data.py -> tests/integration/alpaca/verify_alpaca_data.py
+  scripts/check_alpaca_iv_data.py -> tests/integration/alpaca/check_alpaca_iv_data.py
+  scripts/data_verification/check_alpaca_data_availability.py -> tests/integration/alpaca/check_alpaca_data_availability.py
+  scripts/data_verification/test_backtest_flow.py -> tests/integration/backtest/test_backtest_flow.py
+  scripts/data_verification/test_backtest_with_activity.py -> tests/integration/backtest/test_backtest_with_activity.py
+  scripts/tests/test_backtest_components.py -> tests/integration/backtest/test_backtest_components.py
+  scripts/tests/test_backtest_ui.py -> tests/integration/backtest/test_backtest_ui.py
+  scripts/tests/test_backtest_with_progress.py -> tests/integration/backtest/test_backtest_with_progress.py
+  scripts/tests/verify_backtest_fixes.py -> tests/integration/backtest/verify_backtest_fixes.py
+  scripts/data_verification/verify_backtest_data.py -> tests/integration/backtest/verify_backtest_data.py
+  scripts/debug_backtest_flow.py -> tests/integration/backtest/debug_backtest_flow.py
+  scripts/test_real_iv_backtest.py -> tests/integration/backtest/test_real_iv_backtest.py
+  scripts/data_verification/test_options_data_fetch.py -> tests/integration/options/test_options_data_fetch.py
+  scripts/data_verification/test_options_pricing.py -> tests/integration/options/test_options_pricing.py
+  scripts/data_verification/test_simple_options.py -> tests/integration/options/test_simple_options.py
+  scripts/test_tastytrade_data.py -> tests/integration/api/test_tastytrade_data.py
+  scripts/test_polygon_tastytrade_options.py -> tests/integration/api/test_polygon_tastytrade_options.py
+  scripts/test_free_options_apis.py -> tests/integration/api/test_free_options_apis.py
+  scripts/verify_iv_data.py -> tests/integration/data/verify_iv_data.py
+  scripts/data_verification/test_real_data_backtest.py -> tests/integration/data/test_real_data_backtest.py
+  scripts/data_verification/test_activity_logging.py -> tests/integration/logging/test_activity_logging.py
+  scripts/data_verification/dump_activity_log.py -> tests/integration/logging/dump_activity_log.py
+  scripts/debug_trades.py -> tests/utils/debug_trades.py
+  scripts/data_availability_summary.py -> tests/utils/data_availability_summary.py
+  run_backtest.py -> scripts/production/run_backtest.py
+  run_dashboard.py -> scripts/production/run_dashboard.py
+  scripts/verify_system.py -> scripts/production/verify_system.py
+  scripts/backtest_config_example.py -> scripts/examples/backtest_config_example.py

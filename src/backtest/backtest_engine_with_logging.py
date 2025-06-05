@@ -16,8 +16,10 @@ import os
 
 from src.core.trade_manager import EnhancedTradeManager, TradeManagementRules, OptionContract
 from anthropic import AsyncAnthropic
-from src.backtest.realistic_iv_simulator import RealisticIVSimulator
-from src.backtest.tastytrade_api import TastyTradeDataFetcher
+from src.backtest.tastytrade_historical import TastyTradeHistoricalData
+from src.backtest.historical_iv_database import get_historical_iv_rank
+from src.backtest.polygon_options_fetcher import PolygonOptionsFetcher
+from src.data.backtest_db import backtest_db
 
 logger = logging.getLogger(__name__)
 
@@ -64,17 +66,22 @@ class BacktestEngineWithLogging:
         self.total_days = 0
         self.current_day = 0
         
-        # IV simulator and TastyTrade fetcher
-        self.iv_simulator = RealisticIVSimulator()
-        self.tastytrade_fetcher = None  # Initialize on first use
+        # TastyTrade client for real-time data
+        self.tastytrade_client = None  # Initialize on first use
         
-        # Check if TastyTrade credentials are available
-        if os.getenv('TASTYTRADE_USERNAME') and os.getenv('TASTYTRADE_PASSWORD'):
-            self.use_tastytrade = True
-            self.log_activity("info", "TastyTrade credentials found - will use real IV data")
+        # Polygon client for historical options prices
+        self.polygon_fetcher = PolygonOptionsFetcher()
+        
+        # Always use real IV data from our historical database
+        self.log_activity("info", "Using real IV rank data from historical database (2021-2024)")
+        if self.polygon_fetcher.api_key:
+            self.log_activity("info", "Polygon API available for historical options prices")
         else:
-            self.use_tastytrade = False
-            self.log_activity("info", "No TastyTrade credentials - using simulated IV data")
+            self.log_activity("warning", "No Polygon API key - will use simulated options prices")
+        
+        # Database run tracking
+        self.run_id = None
+        self.save_to_db = True  # Can be disabled if needed
         
     def log_activity(self, type: str, message: str, details: Optional[Dict] = None):
         """Log an activity"""
@@ -136,6 +143,18 @@ class BacktestEngineWithLogging:
         
         self.log_activity("info", f"Backtest completed! Total P&L: ${self.results.total_pnl:,.2f}")
         self.update_progress(self.total_days, self.total_days, "Backtest completed!")
+        
+        # Save to database if enabled
+        if self.save_to_db:
+            try:
+                self.run_id = backtest_db.save_backtest_run(
+                    self.config,
+                    self.results,
+                    notes=f"Backtest run on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                self.log_activity("info", f"Backtest results saved to database (Run ID: {self.run_id})")
+            except Exception as e:
+                self.log_activity("error", f"Failed to save backtest to database: {str(e)}")
         
         return self.results
         
@@ -201,37 +220,27 @@ class BacktestEngineWithLogging:
             # Calculate metrics
             percent_change = day_data['percent_change']
             
-            # Try to get real IV rank from TastyTrade first
-            iv_rank = None
+            # Get REAL IV rank from historical database
+            iv_rank = get_historical_iv_rank(symbol, date)
             
-            if self.use_tastytrade:
+            # If no historical data and date is recent, try real-time TastyTrade
+            if iv_rank is None and (datetime.now() - date).days <= 1:
                 try:
-                    if not self.tastytrade_fetcher:
-                        self.tastytrade_fetcher = TastyTradeDataFetcher()
+                    if not self.tastytrade_client:
+                        self.tastytrade_client = TastyTradeHistoricalData()
+                        await self.tastytrade_client.authenticate()
                     
-                    # Get real IV rank
-                    real_iv_rank = await self.tastytrade_fetcher.get_iv_rank(symbol, date)
-                    
-                    if real_iv_rank is not None:
-                        iv_rank = real_iv_rank
-                        self.log_activity("info", f"Using real IV rank from TastyTrade: {iv_rank:.1f}")
+                    metrics = await self.tastytrade_client.get_market_metrics([symbol])
+                    if symbol in metrics:
+                        iv_rank = metrics[symbol]['iv_rank']
+                        self.log_activity("info", f"Using real-time TastyTrade IV rank: {iv_rank:.1f}")
                 except Exception as e:
-                    self.log_activity("warning", f"TastyTrade API error: {str(e)}")
+                    self.log_activity("warning", f"TastyTrade real-time API error: {str(e)}")
             
-            # Fall back to simulation if needed
+            # If we still don't have real data, skip this day
             if iv_rank is None:
-                # Get volume ratio for IV calculation
-                avg_volume = df_reset['volume'].rolling(20).mean().iloc[-1] if len(df_reset) > 20 else day_data['volume']
-                volume_ratio = day_data['volume'] / avg_volume if avg_volume > 0 else 1.0
-                
-                # Use realistic IV simulator
-                iv_sim = self.iv_simulator.calculate_iv_rank(
-                    symbol=symbol,
-                    date=date,
-                    price_move=percent_change,
-                    volume_ratio=volume_ratio
-                )
-                iv_rank = iv_sim['iv_rank']
+                self.log_activity("warning", f"No real IV rank data for {symbol} on {date.date()} - skipping")
+                return None
             
             self.log_activity("info", f"Real data: {symbol} moved {percent_change:.2f}% on {date.date()}, IV Rank: {iv_rank:.1f}")
             
@@ -329,51 +338,177 @@ class BacktestEngineWithLogging:
         4. Use 14-30 DTE for best theta decay
         5. Position size based on max ${self.current_capital * self.config.max_risk_per_trade:.0f} risk
         
-        IMPORTANT POSITION SIZING:
-        - Max risk allowed: ${self.current_capital * self.config.max_risk_per_trade:.0f}
-        - For a $5 wide spread: Max loss = $500 per contract
-        - Therefore: Maximum contracts = {int(self.current_capital * self.config.max_risk_per_trade / 500)}
-        - Always use 1-2 contracts maximum to stay within risk limits
+        Please provide:
+        1. Your confidence score (0-100) and detailed reasoning
+        2. Show me exactly how you calculated the confidence score
+        3. If trading, specify the exact trade details
         
-        Provide analysis in JSON format:
-        {{
-            "should_trade": true/false,
-            "spread_type": "call_credit" or "put_credit",
-            "short_strike": price,
-            "long_strike": price,
-            "expiration_days": number,
-            "contracts": number,
-            "expected_credit": amount per contract,
-            "probability_profit": percentage,
-            "confidence": 0-100,
-            "reasoning": "explanation"
-        }}
+        Format your response as:
+        DECISION: [TRADE/NO_TRADE]
+        CONFIDENCE: [0-100]
+        CONFIDENCE_REASONING: [Explain step by step how you calculated the confidence score, showing the exact points/weights for each factor]
+        
+        [If TRADE:]
+        SPREAD_TYPE: [call_credit/put_credit]
+        SHORT_STRIKE: [price]
+        LONG_STRIKE: [price]
+        CONTRACTS: [number]
+        EXPECTED_CREDIT: [amount per contract]
+        TRADE_REASONING: [Why this specific trade setup]
         """
         
         try:
             response = await self.anthropic.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=500,
+                max_tokens=800,  # Increased for confidence breakdown
                 messages=[{"role": "user", "content": prompt}]
             )
             
-            # Parse JSON from response
+            # Parse simple text format instead of JSON
             import re
-            json_match = re.search(r'\{.*\}', response.content[0].text, re.DOTALL)
-            if json_match:
-                analysis = json.loads(json_match.group(0))
-                if analysis.get('should_trade'):
-                    return analysis
+            content = response.content[0].text
+            
+            # Log the full response for visibility
+            self.log_activity("info", f"Claude's full analysis: {content}")
+            
+            # Extract fields using simple regex
+            decision_match = re.search(r'DECISION:\s*(TRADE|NO_TRADE)', content)
+            confidence_match = re.search(r'CONFIDENCE:\s*(\d+)', content)
+            confidence_reasoning_match = re.search(r'CONFIDENCE_REASONING:\s*(.+?)(?=\n\w+:|$)', content, re.DOTALL)
+            
+            if not decision_match or not confidence_match:
+                self.log_activity("error", "Could not parse Claude's decision or confidence")
+                return None
+            
+            decision = decision_match.group(1)
+            confidence = int(confidence_match.group(1))
+            confidence_reasoning = confidence_reasoning_match.group(1).strip() if confidence_reasoning_match else "No reasoning provided"
+            
+            self.log_activity("info", f"Claude decision: {decision}, confidence: {confidence}%")
+            
+            if decision == 'NO_TRADE':
+                self.log_activity("info", f"Claude rejected trade - confidence reasoning: {confidence_reasoning}")
+                return None
+            
+            # Extract trade details for TRADE decision
+            spread_type_match = re.search(r'SPREAD_TYPE:\s*(call_credit|put_credit)', content)
+            short_strike_match = re.search(r'SHORT_STRIKE:\s*\$?(\d+(?:\.\d+)?)', content)
+            long_strike_match = re.search(r'LONG_STRIKE:\s*\$?(\d+(?:\.\d+)?)', content)
+            contracts_match = re.search(r'CONTRACTS:\s*(\d+)', content)
+            credit_match = re.search(r'EXPECTED_CREDIT:\s*\$?(\d+(?:\.\d+)?)', content)
+            trade_reasoning_match = re.search(r'TRADE_REASONING:\s*(.+?)(?=\n\w+:|$)', content, re.DOTALL)
+            
+            if not all([spread_type_match, short_strike_match, long_strike_match, contracts_match, credit_match]):
+                self.log_activity("error", "Missing required trade details in Claude response")
+                return None
+            
+            # Create analysis object
+            analysis = {
+                'should_trade': True,
+                'spread_type': spread_type_match.group(1),
+                'short_strike': float(short_strike_match.group(1)),
+                'long_strike': float(long_strike_match.group(1)),
+                'contracts': int(contracts_match.group(1)),
+                'expected_credit': float(credit_match.group(1)),
+                'confidence': confidence,
+                'expiration_days': 21,  # Default
+                'reasoning': trade_reasoning_match.group(1).strip() if trade_reasoning_match else "No trade reasoning provided",
+                'confidence_breakdown': {
+                    'reasoning': confidence_reasoning,
+                    'score': confidence
+                }
+            }
+            
+            # Note: We'll save analyses after the backtest completes and we have a run_id
+            
+            return analysis
                     
         except Exception as e:
             self.log_activity("error", f"Claude analysis error: {str(e)}")
             
         return None
         
+    async def _get_real_options_data(self, symbol: str, date: datetime, analysis: Dict) -> Optional[Dict]:
+        """Get real options data from Alpaca for the proposed trade"""
+        try:
+            # Only use real data for dates where Alpaca has options data
+            if date < self.data_fetcher.OPTIONS_DATA_START_DATE:
+                return None
+                
+            if not self.data_fetcher.has_options_access:
+                return None
+            
+            # Get options chain for 14-30 DTE
+            options_chain = await self.data_fetcher.get_options_chain(symbol, date, dte_min=14, dte_max=30)
+            
+            if not options_chain:
+                return None
+            
+            # Filter for the type Claude suggested
+            spread_type = analysis['spread_type']
+            option_type = 'C' if 'call' in spread_type else 'P'
+            
+            # Filter options by type
+            relevant_options = [opt for opt in options_chain if opt['option_type'] == option_type]
+            
+            if not relevant_options:
+                return None
+            
+            # Find options close to Claude's suggested strikes
+            suggested_short = analysis['short_strike']
+            suggested_long = analysis['long_strike']
+            
+            # Find closest actual strikes
+            strikes = [opt['strike'] for opt in relevant_options]
+            closest_short = min(strikes, key=lambda x: abs(x - suggested_short))
+            closest_long = min(strikes, key=lambda x: abs(x - suggested_long))
+            
+            # Get the actual options data
+            short_option = next((opt for opt in relevant_options if opt['strike'] == closest_short), None)
+            long_option = next((opt for opt in relevant_options if opt['strike'] == closest_long), None)
+            
+            if not short_option or not long_option:
+                return None
+            
+            # Calculate real credit spread pricing
+            short_bid = short_option.get('bid', 0)
+            long_ask = long_option.get('ask', 0)
+            
+            if short_bid <= 0 or long_ask <= 0:
+                return None
+            
+            # Credit = what we collect for selling short - what we pay for buying long
+            real_credit = short_bid - long_ask
+            
+            if real_credit <= 0:
+                return None  # Not a profitable spread
+            
+            self.log_activity("info", f"Real options found: {closest_short}/{closest_long} for ${real_credit:.2f} credit")
+            
+            return {
+                'short_strike': closest_short,
+                'long_strike': closest_long,
+                'expected_credit': real_credit,
+                'expiration_days': short_option.get('dte', 21)
+            }
+            
+        except Exception as e:
+            self.log_activity("warning", f"Error fetching real options data: {str(e)}")
+            return None
+        
     async def _execute_trade(self, signal: Dict, date: datetime):
-        """Execute a backtest trade"""
+        """Execute a backtest trade with real options data"""
         analysis = signal['analysis']
         symbol = signal['symbol']
+        
+        # Try to get real options data for this trade
+        real_options_data = await self._get_real_options_data(symbol, date, analysis)
+        if real_options_data:
+            # Use real options pricing
+            analysis.update(real_options_data)
+            self.log_activity("info", f"Using real options data: {analysis['spread_type']} {analysis['short_strike']}/{analysis['long_strike']}")
+        else:
+            self.log_activity("info", f"Using simulated options pricing for {analysis['spread_type']}")
         
         # Calculate trade details
         spread_width = abs(analysis['long_strike'] - analysis['short_strike'])
@@ -405,7 +540,7 @@ class BacktestEngineWithLogging:
             
         self.log_activity("info", f"Position sized to {contracts} contracts (max loss: ${max_loss:.2f})")
             
-        # Create trade
+        # Create trade with confidence data
         trade = self.BacktestTrade(
             entry_time=date,
             symbol=symbol,
@@ -415,7 +550,9 @@ class BacktestEngineWithLogging:
             contracts=contracts,
             entry_credit=total_credit,
             max_profit=total_credit,
-            max_loss=max_loss
+            max_loss=max_loss,
+            confidence_score=analysis.get('confidence', 0),
+            confidence_breakdown=analysis.get('confidence_breakdown', None)
         )
         
         # Store trade

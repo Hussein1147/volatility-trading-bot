@@ -18,6 +18,9 @@ from anthropic import AsyncAnthropic
 import os
 import json
 from src.backtest.backtest_progress import BacktestProgress
+from src.backtest.data_fetcher import AlpacaDataFetcher
+from src.core.position_sizer import DynamicPositionSizer
+from src.core.strike_selector import DeltaStrikeSelector
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +32,7 @@ class BacktestConfig:
     symbols: List[str]
     initial_capital: float = 100000
     max_risk_per_trade: float = 0.02
-    min_iv_rank: float = 70
+    min_iv_rank: float = 40
     min_price_move: float = 1.5
     confidence_threshold: int = 70
     commission_per_contract: float = 0.65
@@ -90,6 +93,12 @@ class BacktestEngine:
         self.progress_callback = progress_callback
         self.progress = BacktestProgress()
         
+        # Initialize data fetcher for real historical data
+        self.data_fetcher = AlpacaDataFetcher()
+        
+        # Initialize dynamic position sizer
+        self.position_sizer = DynamicPositionSizer(self.current_capital)
+        
         # Rate limiting for Claude API (5 requests per minute)
         self.last_api_calls = []
         self.max_api_calls_per_minute = 4  # Keep it under 5 to be safe
@@ -100,6 +109,15 @@ class BacktestEngine:
         logger.info(f"Starting backtest from {self.config.start_date} to {self.config.end_date}")
         logger.info(f"Symbols: {', '.join(self.config.symbols)}")
         logger.info(f"Initial capital: ${self.config.initial_capital:,.2f}")
+        
+        # Log data sources being used
+        logger.info("Real data sources configured:")
+        if hasattr(self.data_fetcher, 'tastytrade_fetcher') and self.data_fetcher.tastytrade_fetcher.api.username:
+            logger.info("  ✓ TastyTrade: IV Rank data")
+        if hasattr(self.data_fetcher, 'polygon_fetcher') and self.data_fetcher.polygon_fetcher.api_key:
+            logger.info("  ✓ Polygon: Historical options data")
+        if self.data_fetcher.has_options_access:
+            logger.info("  ✓ Alpaca: Recent options data with Greeks")
         
         # Generate trading days
         current_date = self.config.start_date
@@ -143,26 +161,73 @@ class BacktestEngine:
             
     async def _get_historical_data(self, symbol: str, date: datetime) -> Optional[Dict]:
         """Get historical market data for a symbol on a specific date"""
-        # In a real implementation, this would fetch from Alpaca
-        # For now, simulate realistic market moves
-        
-        # Simulate volatility events
-        random_event = np.random.random()
-        if random_event < 0.05:  # 5% chance of significant move (reduced for faster backtests)
-            percent_change = np.random.choice([-3, -2.5, -2, 2, 2.5, 3])
-            iv_rank = np.random.uniform(70, 95)
+        try:
+            # Get real stock data for the date range around this date
+            start_date = date - timedelta(days=30)  # Get 30 days for technical indicators
+            end_date = date + timedelta(days=1)
             
-            return {
-                'symbol': symbol,
-                'date': date,
-                'current_price': 100 * (1 + percent_change/100),
-                'percent_change': percent_change,
-                'volume': np.random.randint(1000000, 5000000),
-                'iv_rank': iv_rank,
-                'iv_percentile': iv_rank + 5
-            }
-        
-        return None
+            df = await self.data_fetcher.get_stock_data(symbol, start_date, end_date)
+            
+            if df.empty:
+                logger.warning(f"No stock data available for {symbol} on {date}")
+                return None
+                
+            # Find the closest trading day to our target date
+            df.index = pd.to_datetime(df.index)
+            target_date = pd.to_datetime(date.date())
+            
+            # Get the closest date that's <= target_date
+            available_dates = df.index[df.index <= target_date]
+            if len(available_dates) == 0:
+                return None
+                
+            closest_date = available_dates.max()
+            day_data = df.loc[closest_date]
+            
+            # Check if this is a significant move worth trading
+            percent_change = day_data['percent_change']
+            volume = day_data['volume']
+            
+            # Only return data for significant moves (like volatility events)
+            if abs(percent_change) >= self.config.min_price_move:
+                # Get real volatility data including IV rank from TastyTrade
+                vol_data = await self.data_fetcher.get_historical_volatility_data(
+                    symbol, date, lookback_days=365
+                )
+                
+                # Use real IV rank if available, otherwise use calculated value
+                if vol_data and 'iv_rank' in vol_data:
+                    iv_rank = vol_data['iv_rank']
+                    logger.debug(f"Using real IV rank for {symbol}: {iv_rank:.1f}")
+                else:
+                    # Fallback calculation
+                    realized_vol = day_data.get('realized_vol', 20)
+                    iv_rank = min(max(realized_vol * 3, 50), 100)
+                
+                # Get technical indicators
+                sma_20 = day_data.get('sma_20', day_data['close'])
+                rsi_14 = day_data.get('rsi_14', 50.0)
+                
+                return {
+                    'symbol': symbol,
+                    'date': date,
+                    'current_price': float(day_data['close']),
+                    'percent_change': float(percent_change),
+                    'volume': int(volume),
+                    'iv_rank': float(iv_rank),
+                    'iv_percentile': float(iv_rank + 5),
+                    'high': float(day_data['high']),
+                    'low': float(day_data['low']),
+                    'open': float(day_data['open']),
+                    'sma_20': float(sma_20),
+                    'rsi_14': float(rsi_14)
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error fetching historical data for {symbol} on {date}: {e}")
+            return None
         
     async def _analyze_opportunity(self, symbol: str, market_data: Dict, date: datetime) -> Optional[Dict]:
         """Analyze if conditions are met for a trade"""
@@ -230,15 +295,35 @@ class BacktestEngine:
         IV Rank: {market_data['iv_rank']:.1f}
         IV Percentile: {market_data['iv_percentile']:.1f}
         
+        Technical Indicators:
+        20-day SMA: ${market_data.get('sma_20', market_data['current_price']):.2f}
+        14-day RSI: {market_data.get('rsi_14', 50):.1f}
+        Price vs SMA: {"Above" if market_data['current_price'] > market_data.get('sma_20', market_data['current_price']) else "Below"} SMA
+        
         Account Balance: ${self.current_capital:.2f}
         Max Risk per Trade: {self.config.max_risk_per_trade * 100}%
         
+        IMPORTANT Directional Filter Rules:
+        - PUT CREDIT SPREADS: ONLY if price > SMA AND RSI > 50
+        - CALL CREDIT SPREADS: ONLY if price < SMA AND RSI < 50
+        - If conditions don't match, DO NOT TRADE
+        
         Strategy Rules:
-        1. If big move DOWN: Sell CALL credit spread above resistance
-        2. If big move UP: Sell PUT credit spread below support
-        3. Target 1.5-2 standard deviations from current price
-        4. Use 14-30 DTE for best theta decay
-        5. Position size based on max ${self.current_capital * self.config.max_risk_per_trade:.0f} risk
+        1. Check directional filters FIRST - if they don't match, set should_trade = false
+        2. If filters pass and big move DOWN: Sell CALL credit spread above resistance
+        3. If filters pass and big move UP: Sell PUT credit spread below support
+        4. Target 15 delta for short strike (approximately 85% probability of profit)
+        5. Use 40-50 DTE for primary book, 7-14 DTE only if IV Rank >= 80
+        6. Calculate confidence score based on multiple factors
+        
+        Confidence Scoring (start at 50, add/subtract):
+        - IV Rank 40-60: +5, 60-80: +10, 80+: +15
+        - Price move 1.5-2%: +5, 2-3%: +10, 3%+: +15
+        - Volume above average: +5
+        - Directional alignment strong: +10
+        - Strike distance good (1.5-2 SD): +10
+        - DTE in sweet spot (40-50): +5
+        - Subtract for risks: earnings nearby -10, major support/resistance breach -5
         
         Provide analysis in JSON format:
         {{
@@ -247,18 +332,19 @@ class BacktestEngine:
             "short_strike": price,
             "long_strike": price,
             "expiration_days": number,
-            "contracts": number,
             "expected_credit": amount per contract,
+            "spread_width": strike difference,
             "probability_profit": percentage,
             "confidence": 0-100,
-            "confidence_breakdown": {{
-                "base_score": 50,
-                "market_conditions": {{"iv_rank": score, "price_move": score, "volume": score}},
-                "strategy_alignment": {{"spread_selection": score, "strike_distance": score}},
-                "risk_management": {{"position_sizing": score, "expiration": score}},
-                "technical_factors": {{"support_resistance": score, "trend": score}},
-                "deductions": {{"risks": list_of_risks_and_scores}},
-                "calculation": "show the math: 50 + X - Y = final_score"
+            "confidence_factors": {{
+                "iv_rank_score": number,
+                "price_move_score": number,
+                "volume_score": number,
+                "directional_score": number,
+                "strike_distance_score": number,
+                "dte_score": number,
+                "risk_deductions": number,
+                "total": number
             }},
             "reasoning": "explanation"
         }}
@@ -302,36 +388,91 @@ class BacktestEngine:
             
             try:
                 analysis = json.loads(json_str)
+                logger.info(f"Claude analysis successful: should_trade={analysis.get('should_trade')}, confidence={analysis.get('confidence')}")
                 if analysis.get('should_trade'):
                     return analysis
+                else:
+                    logger.info(f"Claude rejected trade: {analysis.get('reasoning', 'No reasoning provided')}")
+                    return None
             except json.JSONDecodeError as je:
                 logger.error(f"JSON decode error: {je}")
-                logger.debug(f"Attempted to parse: {json_str[:200]}...")
+                logger.error(f"Attempted to parse: {json_str[:200]}...")
+                logger.error(f"Full response: {response.content[0].text}")
                     
         except Exception as e:
             logger.error(f"Claude analysis error: {e}")
             # Log the raw response for debugging
             if 'response' in locals():
-                logger.debug(f"Raw Claude response: {response.content[0].text[:500]}")
+                logger.error(f"Raw Claude response: {response.content[0].text[:500]}")
             
         return None
         
     async def _execute_trade(self, signal: Dict, date: datetime):
-        """Execute a backtest trade"""
+        """Execute a backtest trade with dynamic position sizing"""
         analysis = signal['analysis']
         symbol = signal['symbol']
+        market_data = signal['market_data']
         
-        # Calculate trade details
-        spread_width = abs(analysis['long_strike'] - analysis['short_strike'])
-        credit_per_contract = analysis['expected_credit']
-        contracts = analysis['contracts']
-        total_credit = credit_per_contract * contracts * 100
-        max_loss = (spread_width - credit_per_contract) * contracts * 100
+        # Try to get real options data for the strikes
+        options_chain = await self.data_fetcher.get_options_chain(
+            symbol, date, 
+            analysis['expiration_days'] - 5,
+            analysis['expiration_days'] + 5
+        )
         
-        # Check if we have enough capital
-        if max_loss > self.current_capital * self.config.max_risk_per_trade:
-            return
+        # Look for actual option prices if available
+        real_credit = None
+        if options_chain:
+            # Find options matching our strikes
+            short_opt = next((opt for opt in options_chain 
+                            if opt['strike'] == analysis['short_strike'] 
+                            and opt['type'] == analysis['spread_type'].replace('_credit', '')), None)
+            long_opt = next((opt for opt in options_chain 
+                           if opt['strike'] == analysis['long_strike'] 
+                           and opt['type'] == analysis['spread_type'].replace('_credit', '')), None)
             
+            if short_opt and long_opt:
+                real_credit = short_opt['mid'] - long_opt['mid']
+                logger.debug(f"Using real option prices: short=${short_opt['mid']:.2f}, long=${long_opt['mid']:.2f}, credit=${real_credit:.2f}")
+        
+        # Calculate spread details
+        spread_width = analysis.get('spread_width', abs(analysis['long_strike'] - analysis['short_strike']))
+        credit_per_contract = real_credit if real_credit else analysis['expected_credit']
+        max_loss_per_contract = (spread_width * 100) - credit_per_contract
+        
+        # Determine book type based on DTE
+        expiration_days = analysis['expiration_days']
+        if expiration_days >= 40:
+            book_type = 'PRIMARY'
+        elif 7 <= expiration_days <= 14 and market_data['iv_rank'] >= 80:
+            book_type = 'INCOME_POP'
+        else:
+            book_type = 'PRIMARY'  # Default
+        
+        # Get current open positions for risk calculation
+        current_positions = list(self.open_positions.values())
+        
+        # Use dynamic position sizing based on confidence
+        position_size = self.position_sizer.calculate_position_size(
+            confidence=analysis['confidence'],
+            max_loss_per_contract=max_loss_per_contract,
+            book_type=book_type,
+            current_positions=current_positions
+        )
+        
+        # Check if we got any contracts
+        if position_size.contracts == 0:
+            logger.info(f"Position sizing returned 0 contracts for {symbol} - skipping trade")
+            return
+        
+        # Calculate actual values with sized position
+        contracts = position_size.contracts
+        total_credit = credit_per_contract * contracts * 100
+        max_loss = position_size.total_max_loss
+        
+        # Update capital for position sizer
+        self.position_sizer.update_account_balance(self.current_capital)
+        
         # Create trade record
         trade = BacktestTrade(
             entry_time=date,
@@ -344,7 +485,7 @@ class BacktestEngine:
             max_profit=total_credit,
             max_loss=max_loss,
             confidence_score=analysis.get('confidence', 0),
-            confidence_breakdown=analysis.get('confidence_breakdown', None)
+            confidence_breakdown=analysis.get('confidence_factors', analysis.get('confidence_breakdown', None))
         )
         
         # Store in open positions
@@ -354,11 +495,13 @@ class BacktestEngine:
         # Log the trade
         logger.info(f"BACKTEST TRADE: {symbol} {analysis['spread_type']} "
                    f"{analysis['short_strike']}/{analysis['long_strike']} "
-                   f"x{contracts} for ${total_credit:.2f} credit")
+                   f"x{contracts} for ${total_credit:.2f} credit | "
+                   f"Confidence: {analysis['confidence']}% ({position_size.confidence_tier}) | "
+                   f"Risk: {position_size.risk_percentage:.1%}")
         
         # Update progress with trade info
         self.progress.trades_completed += 1
-        self.progress.message = f"💰 OPENED: {symbol} {analysis['spread_type']} @ ${total_credit:.2f}"
+        self.progress.message = f"💰 OPENED: {symbol} {analysis['spread_type']} @ ${total_credit:.2f} | {position_size.confidence_tier}"
         if self.progress_callback:
             await self.progress_callback(self.progress)
         
@@ -389,8 +532,8 @@ class BacktestEngine:
             # Check exit conditions
             exit_reason = None
             
-            # Profit target: 35% of max profit
-            if current_pnl >= trade.max_profit * 0.35:
+            # Profit target: 50% of max profit (professional strategy)
+            if current_pnl >= trade.max_profit * 0.50:
                 exit_reason = "Profit Target"
                 
             # Stop loss: 100% of credit received (max loss scenario)

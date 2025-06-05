@@ -835,7 +835,12 @@ def main():
                 open_positions = len(positions)
                 option_positions = len([p for p in positions if p.get('is_option', False)])
                 
-                metrics_cols = st.columns(4)
+                # Get account info
+                tracker = PositionTracker(paper_trading=st.session_state.get('paper_trading', True))
+                account_info = tracker.get_account_info()
+                
+                # First row of metrics
+                metrics_cols = st.columns(5)
                 with metrics_cols[0]:
                     st.metric("Open Positions", open_positions)
                 
@@ -848,23 +853,70 @@ def main():
                     st.metric("Option Spreads", len(option_spreads))
                 
                 with metrics_cols[3]:
-                    # Get account info
-                    tracker = PositionTracker(paper_trading=st.session_state.get('paper_trading', True))
-                    account_info = tracker.get_account_info()
                     st.metric("Buying Power", f"${account_info.get('buying_power', 0):,.2f}")
+                
+                with metrics_cols[4]:
+                    equity = account_info.get('equity', 0)
+                    st.metric("Account Value", f"${equity:,.2f}")
+                
+                # Performance metrics from database
+                st.subheader("📈 Performance Metrics")
+                db_stats = trade_db.get_statistics()
+                # Get all trades and filter for today
+                all_trades = trade_db.get_trades(limit=100)
+                today = datetime.now().date()
+                trades_today = [t for t in all_trades if datetime.fromisoformat(t['timestamp']).date() == today]
+                
+                perf_cols = st.columns(6)
+                with perf_cols[0]:
+                    st.metric("Total Trades", db_stats['total_trades'])
+                
+                with perf_cols[1]:
+                    # Calculate win rate from closed trades
+                    closed_trades = [t for t in trades_today if t['status'] == 'closed']
+                    if closed_trades:
+                        winning = len([t for t in closed_trades if t.get('pnl', 0) > 0])
+                        win_rate = (winning / len(closed_trades)) * 100
+                    else:
+                        win_rate = 0
+                    st.metric("Win Rate", f"{win_rate:.1f}%")
+                
+                with perf_cols[2]:
+                    st.metric("Avg Confidence", f"{db_stats['avg_confidence']:.1f}%")
+                
+                with perf_cols[3]:
+                    trade_signals = db_stats['trade_signals']
+                    total_analyses = db_stats['total_analyses']
+                    signal_rate = (trade_signals / total_analyses * 100) if total_analyses > 0 else 0
+                    st.metric("Signal Rate", f"{signal_rate:.1f}%")
+                
+                with perf_cols[4]:
+                    # Today's realized P&L
+                    today_pnl = sum(t.get('pnl', 0) for t in closed_trades)
+                    st.metric("Today's P&L", f"${today_pnl:.2f}",
+                             delta=f"{today_pnl:.2f}" if today_pnl != 0 else None,
+                             delta_color="normal" if today_pnl >= 0 else "inverse")
+                
+                with perf_cols[5]:
+                    # Average trade size
+                    if db_stats['total_trades'] > 0:
+                        avg_credit = sum(t.get('credit', 0) for t in trades_today) / len(trades_today) if trades_today else 0
+                        st.metric("Avg Credit", f"${avg_credit:.2f}")
+                    else:
+                        st.metric("Avg Credit", "$0.00")
                     
             except Exception as e:
                 st.error(f"Error fetching positions: {e}")
                 # Fall back to stored data
                 metrics_cols = st.columns(4)
                 with metrics_cols[0]:
-                    st.metric("Open Trades", summary['open_trades'])
+                    st.metric("Open Trades", summary.get('open_trades', 0))
                 with metrics_cols[1]:
-                    st.metric("Unrealized P&L", f"${summary['unrealized_pnl']:.2f}")
+                    st.metric("Unrealized P&L", f"${summary.get('unrealized_pnl', 0):.2f}")
                 with metrics_cols[2]:
-                    st.metric("Total Credit", f"${summary['total_credit']:.2f}")
+                    st.metric("Total Credit", f"${summary.get('total_credit', 0):.2f}")
                 with metrics_cols[3]:
-                    st.metric("Max Loss", f"${summary['total_max_loss']:.2f}")
+                    st.metric("Max Loss", f"${summary.get('total_max_loss', 0):.2f}")
         else:
             # Dev mode - show simulated metrics with P&L
             sim_summary = simulated_tracker.get_portfolio_summary()

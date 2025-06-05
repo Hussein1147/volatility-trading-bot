@@ -13,6 +13,7 @@ from plotly.subplots import make_subplots
 import os
 import sys
 import time
+import json
 
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +23,7 @@ from src.backtest.backtest_engine import BacktestConfig
 from src.backtest.backtest_engine_with_logging import BacktestEngineWithLogging, ActivityLogEntry
 from src.backtest.visualizer import BacktestVisualizer
 from src.backtest.advanced_visualizer import AdvancedBacktestVisualizer
+from src.data.backtest_db import backtest_db
 
 st.set_page_config(
     page_title="Volatility Trading Backtest",
@@ -168,7 +170,7 @@ def main():
             
         # Symbol selection
         st.subheader("🎯 Symbols")
-        available_symbols = ['SPY', 'QQQ', 'IWM', 'DIA']
+        available_symbols = ['SPY', 'QQQ', 'IWM', 'DIA', 'XLE', 'XLK']
         symbols = st.multiselect(
             "Select symbols to backtest",
             available_symbols,
@@ -196,9 +198,9 @@ def main():
         st.subheader("📊 Strategy Parameters")
         min_iv_rank = st.slider(
             "Min IV Rank",
-            min_value=50,
+            min_value=30,
             max_value=90,
-            value=70,
+            value=40,
             step=5
         )
         
@@ -221,164 +223,167 @@ def main():
         # Run button
         run_clicked = st.button("🚀 Run Backtest", type="primary", use_container_width=True)
     
-    # Main area
-    if run_clicked:
-        if not symbols:
-            st.error("Please select at least one symbol")
-        else:
-            # Create config
-            config = BacktestConfig(
-                start_date=datetime.combine(start_date, datetime.min.time()),
-                end_date=datetime.combine(end_date, datetime.min.time()),
-                symbols=symbols,
-                initial_capital=initial_capital,
-                max_risk_per_trade=max_risk_per_trade/100,
-                min_iv_rank=min_iv_rank,
-                min_price_move=min_price_move,
-                confidence_threshold=confidence_threshold,
-                commission_per_contract=0.65,
-                use_real_data=True
-            )
-            
-            st.header("🔄 Running Backtest")
-            
-            # Progress section
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                progress_container = st.empty()
-            with col2:
-                stats_container = st.empty()
-            
-            # Activity log section
-            st.subheader("📋 Activity Log")
-            log_container = st.empty()
-            
-            # Run backtest
-            asyncio.run(run_backtest_async(config, progress_container, log_container))
-            
-            # Show completion
-            st.success("✅ Backtest completed!")
+    # Main area with tabs
+    tab1, tab2 = st.tabs(["🚀 Run Backtest", "📚 Saved Results"])
     
-    # Display results if available
-    if st.session_state.backtest_results:
-        results = st.session_state.backtest_results
-        visualizer = BacktestVisualizer(results)
+    with tab1:
+        if run_clicked:
+            if not symbols:
+                st.error("Please select at least one symbol")
+            else:
+                # Create config
+                config = BacktestConfig(
+                    start_date=datetime.combine(start_date, datetime.min.time()),
+                    end_date=datetime.combine(end_date, datetime.min.time()),
+                    symbols=symbols,
+                    initial_capital=initial_capital,
+                    max_risk_per_trade=max_risk_per_trade/100,
+                    min_iv_rank=min_iv_rank,
+                    min_price_move=min_price_move,
+                    confidence_threshold=confidence_threshold,
+                    commission_per_contract=0.65,
+                    use_real_data=True
+                )
+                
+                st.header("🔄 Running Backtest")
+                
+                # Progress section
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    progress_container = st.empty()
+                with col2:
+                    stats_container = st.empty()
+                
+                # Activity log section
+                st.subheader("📋 Activity Log")
+                log_container = st.empty()
+                
+                # Run backtest
+                asyncio.run(run_backtest_async(config, progress_container, log_container))
+                
+                # Show completion
+                st.success("✅ Backtest completed!")
         
-        # Performance summary
-        st.header("📊 Performance Summary")
-        
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
-        
-        summary = visualizer.create_performance_summary()
-        
-        with col1:
-            st.metric(
-                "Total Return",
-                f"{summary['total_return']:.2f}%",
-                delta=f"${summary['total_pnl']:.2f}"
-            )
+        # Display results if available
+        if st.session_state.backtest_results:
+            results = st.session_state.backtest_results
+            visualizer = BacktestVisualizer(results)
             
-        with col2:
-            st.metric(
-                "Sharpe Ratio",
-                f"{summary['sharpe_ratio']:.2f}",
-                delta="Annualized"
-            )
+            # Performance summary
+            st.header("📊 Performance Summary")
             
-        with col3:
-            st.metric(
-                "Max Drawdown",
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            
+            summary = visualizer.create_performance_summary()
+            
+            with col1:
+                st.metric(
+                    "Total Return",
+                    f"{summary['total_return']:.2f}%",
+                    delta=f"${summary['total_pnl']:.2f}"
+                )
+            
+            with col2:
+                st.metric(
+                    "Sharpe Ratio",
+                    f"{summary['sharpe_ratio']:.2f}",
+                    delta="Annualized"
+                )
+            
+            with col3:
+                st.metric(
+                    "Max Drawdown",
                 f"{summary['max_drawdown']:.2f}%",
                 delta=None,
                 delta_color="inverse"
             )
             
-        with col4:
-            st.metric(
-                "Win Rate",
-                f"{summary['win_rate']:.1f}%",
-                delta=f"{summary['total_trades']} trades"
-            )
+            with col4:
+                st.metric(
+                    "Win Rate",
+                    f"{summary['win_rate']:.1f}%",
+                    delta=f"{summary['total_trades']} trades"
+                )
             
-        with col5:
-            st.metric(
-                "Avg Win",
-                f"${summary['avg_win']:.2f}",
-                delta=None
-            )
+            with col5:
+                st.metric(
+                    "Avg Win",
+                    f"${summary['avg_win']:.2f}",
+                    delta=None
+                )
             
-        with col6:
-            st.metric(
-                "Avg Loss",
-                f"${summary['avg_loss']:.2f}",
-                delta=None,
-                delta_color="inverse"
-            )
-        
-        # Visualizations
-        st.header("📈 Performance Charts")
-        
-        # Equity curve
-        fig_equity = visualizer.plot_equity_curve()
-        st.plotly_chart(fig_equity, use_container_width=True, key="equity_curve")
-        
-        # Monthly returns and distribution
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig_monthly = visualizer.plot_monthly_returns()
-            st.plotly_chart(fig_monthly, use_container_width=True, key="monthly_returns")
+            with col6:
+                st.metric(
+                    "Avg Loss",
+                    f"${summary['avg_loss']:.2f}",
+                    delta=None,
+                    delta_color="inverse"
+                )
             
-        with col2:
-            fig_dist = visualizer.plot_returns_distribution()
-            st.plotly_chart(fig_dist, use_container_width=True, key="returns_dist")
-        
-        # Win/Loss Analysis and Trade Timeline
-        st.header("📊 Trade Performance Analysis")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig_winloss = visualizer.plot_win_loss_analysis()
-            st.plotly_chart(fig_winloss, use_container_width=True, key="win_loss_analysis")
+            # Visualizations
+            st.header("📈 Performance Charts")
             
-        with col2:
-            fig_timeline = visualizer.plot_trade_timeline()
-            st.plotly_chart(fig_timeline, use_container_width=True, key="trade_timeline")
-        
-        # Advanced Analysis
-        advanced_viz = AdvancedBacktestVisualizer(results)
-        
-        # Greeks and Strategy Analysis
-        st.header("🎯 Options Greeks & Strategy Analysis")
-        fig_greeks = advanced_viz.plot_greeks_analysis()
-        st.plotly_chart(fig_greeks, use_container_width=True, key="greeks_analysis")
-        
-        # Volatility Analysis
-        st.header("📈 Volatility & Trade Conditions")
-        fig_volatility = advanced_viz.plot_volatility_analysis()
-        st.plotly_chart(fig_volatility, use_container_width=True, key="volatility_analysis")
-        
-        # Performance Heatmap
-        st.header("🔥 Performance Heatmap")
-        fig_heatmap = advanced_viz.plot_performance_heatmap()
-        st.plotly_chart(fig_heatmap, use_container_width=True, key="performance_heatmap")
-        
-        # Risk Metrics Dashboard
-        st.header("⚠️ Risk Metrics Dashboard")
-        fig_risk = advanced_viz.plot_risk_metrics_dashboard()
-        st.plotly_chart(fig_risk, use_container_width=True, key="risk_metrics")
-        
-        # Confidence Score Breakdown
-        st.header("🎯 Confidence Score Analysis")
-        fig_confidence = advanced_viz.plot_confidence_breakdown()
-        st.plotly_chart(fig_confidence, use_container_width=True, key="confidence_breakdown")
-        
-        # Trade analysis
-        st.header("📊 Trade Analysis")
-        
-        if results.trades:
-            trade_df = pd.DataFrame([
+            # Equity curve
+            fig_equity = visualizer.plot_equity_curve()
+            st.plotly_chart(fig_equity, use_container_width=True, key="equity_curve")
+            
+            # Monthly returns and distribution
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig_monthly = visualizer.plot_monthly_returns()
+                st.plotly_chart(fig_monthly, use_container_width=True, key="monthly_returns")
+            
+            with col2:
+                fig_dist = visualizer.plot_returns_distribution()
+                st.plotly_chart(fig_dist, use_container_width=True, key="returns_dist")
+            
+            # Win/Loss Analysis and Trade Timeline
+            st.header("📊 Trade Performance Analysis")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig_winloss = visualizer.plot_win_loss_analysis()
+                st.plotly_chart(fig_winloss, use_container_width=True, key="win_loss_analysis")
+            
+            with col2:
+                fig_timeline = visualizer.plot_trade_timeline()
+                st.plotly_chart(fig_timeline, use_container_width=True, key="trade_timeline")
+            
+            # Advanced Analysis
+            advanced_viz = AdvancedBacktestVisualizer(results)
+            
+            # Greeks and Strategy Analysis
+            st.header("🎯 Options Greeks & Strategy Analysis")
+            fig_greeks = advanced_viz.plot_greeks_analysis()
+            st.plotly_chart(fig_greeks, use_container_width=True, key="greeks_analysis")
+            
+            # Volatility Analysis
+            st.header("📈 Volatility & Trade Conditions")
+            fig_volatility = advanced_viz.plot_volatility_analysis()
+            st.plotly_chart(fig_volatility, use_container_width=True, key="volatility_analysis")
+            
+            # Performance Heatmap
+            st.header("🔥 Performance Heatmap")
+            fig_heatmap = advanced_viz.plot_performance_heatmap()
+            st.plotly_chart(fig_heatmap, use_container_width=True, key="performance_heatmap")
+            
+            # Risk Metrics Dashboard
+            st.header("⚠️ Risk Metrics Dashboard")
+            fig_risk = advanced_viz.plot_risk_metrics_dashboard()
+            st.plotly_chart(fig_risk, use_container_width=True, key="risk_metrics")
+            
+            # Confidence Score Breakdown
+            st.header("🎯 Confidence Score Analysis")
+            fig_confidence = advanced_viz.plot_confidence_breakdown()
+            st.plotly_chart(fig_confidence, use_container_width=True, key="confidence_breakdown")
+            
+            # Trade analysis
+            st.header("📊 Trade Analysis")
+            
+            if results.trades:
+                trade_df = pd.DataFrame([
                 {
                     'Date': trade.entry_time,
                     'Symbol': trade.symbol,
@@ -391,21 +396,21 @@ def main():
                     'Confidence': f"{getattr(trade, 'confidence_score', 0)}%",
                     'Exit': trade.exit_reason if trade.exit_reason else "Open"
                 }
-                for trade in results.trades
-            ])
-            
-            st.dataframe(trade_df, use_container_width=True)
-        else:
-            st.info("No trades were executed during the backtest period.")
-        
-        # Show complete activity log
-        with st.expander("📋 Complete Activity Log", expanded=False):
-            for entry in st.session_state.activity_log:
-                st.text(format_activity_entry(entry))
+                    for trade in results.trades
+                ])
                 
-        # Debug section
-        with st.expander("🔍 Debug Info", expanded=False):
-            col1, col2, col3 = st.columns(3)
+                st.dataframe(trade_df, use_container_width=True)
+            else:
+                st.info("No trades were executed during the backtest period.")
+            
+            # Show complete activity log
+            with st.expander("📋 Complete Activity Log", expanded=False):
+                for entry in st.session_state.activity_log:
+                    st.text(format_activity_entry(entry))
+                
+            # Debug section
+            with st.expander("🔍 Debug Info", expanded=False):
+                col1, col2, col3 = st.columns(3)
             
             with col1:
                 st.metric("Trades in results", len(results.trades))
@@ -436,6 +441,168 @@ def main():
                         'Exit Reason': trade.exit_reason if hasattr(trade, 'exit_reason') else 'N/A'
                     })
                 st.dataframe(pd.DataFrame(sample_data))
+    
+    # Saved Results Tab
+    with tab2:
+        st.header("📚 Saved Backtest Results")
+        
+        # Get saved runs
+        saved_runs = backtest_db.get_backtest_runs(limit=20)
+        
+        if not saved_runs:
+            st.info("No saved backtest results yet. Run a backtest to save results!")
+        else:
+            # Run selector
+            st.subheader("Select a Backtest Run")
+            
+            # Create display options
+            run_options = {}
+            for run in saved_runs:
+                timestamp = datetime.fromisoformat(run['run_timestamp'])
+                config = json.loads(run['config'])
+                label = f"{timestamp.strftime('%Y-%m-%d %H:%M')} | {', '.join(config['symbols'])} | P&L: ${run['total_pnl']:.2f}"
+                run_options[label] = run['run_id']
+            
+            selected_label = st.selectbox("Choose a run to analyze:", list(run_options.keys()))
+            selected_run_id = run_options[selected_label]
+            
+            # Load selected run
+            run_data = next(r for r in saved_runs if r['run_id'] == selected_run_id)
+            
+            # Display run summary
+            st.subheader("📊 Run Summary")
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            
+            with col1:
+                st.metric("Total P&L", f"${run_data['total_pnl']:.2f}")
+            with col2:
+                st.metric("Win Rate", f"{run_data['win_rate']:.1f}%")
+            with col3:
+                st.metric("Sharpe Ratio", f"{run_data['sharpe_ratio']:.2f}")
+            with col4:
+                st.metric("Max Drawdown", f"{run_data['max_drawdown_pct']:.1f}%")
+            with col5:
+                st.metric("Total Trades", run_data['total_trades'])
+            with col6:
+                st.metric("Profit Factor", f"{run_data['profit_factor']:.2f}")
+            
+            # Configuration details
+            with st.expander("🔧 Configuration", expanded=False):
+                config = json.loads(run_data['config'])
+                st.json(config)
+            
+            # Load trades and analyses
+            trades = backtest_db.get_run_trades(selected_run_id)
+            analyses = backtest_db.get_run_analyses(selected_run_id)
+            
+            # Tabs for detailed analysis
+            analysis_tab1, analysis_tab2, analysis_tab3 = st.tabs(["Trades", "Claude Analyses", "Confidence Analysis"])
+            
+            with analysis_tab1:
+                st.subheader("📈 Trade Details")
+                if trades:
+                    trades_df = pd.DataFrame(trades)
+                    trades_df['entry_time'] = pd.to_datetime(trades_df['entry_time'])
+                    trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
+                    
+                    # Format for display
+                    display_df = trades_df[[
+                        'entry_time', 'symbol', 'spread_type', 'short_strike',
+                        'long_strike', 'contracts', 'entry_credit', 'realized_pnl',
+                        'exit_reason', 'days_in_trade', 'confidence_score'
+                    ]]
+                    
+                    st.dataframe(display_df, use_container_width=True)
+                    
+                    # P&L distribution
+                    st.subheader("P&L Distribution")
+                    fig = px.histogram(trades_df, x='realized_pnl', nbins=20,
+                                     title="Trade P&L Distribution")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No trades found for this run")
+            
+            with analysis_tab2:
+                st.subheader("🤖 Claude's Analyses")
+                if analyses:
+                    # Filter for actual trade signals
+                    trade_analyses = [a for a in analyses if a['should_trade']]
+                    
+                    st.metric("Total Analyses", len(analyses))
+                    st.metric("Trade Signals", len(trade_analyses))
+                    
+                    # Show recent analyses
+                    for analysis in analyses[-10:]:
+                        timestamp = datetime.fromisoformat(analysis['timestamp'])
+                        with st.expander(f"{analysis['symbol']} - {timestamp.strftime('%H:%M:%S')} - Confidence: {analysis['confidence']}%"):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write(f"**Price:** ${analysis['current_price']:.2f}")
+                                st.write(f"**Change:** {analysis['percent_change']:.2f}%")
+                                st.write(f"**IV Rank:** {analysis['iv_rank']:.1f}")
+                            with col2:
+                                if analysis['should_trade']:
+                                    st.write(f"**Decision:** TRADE")
+                                    st.write(f"**Type:** {analysis['spread_type']}")
+                                    st.write(f"**Strikes:** ${analysis['short_strike']}/{analysis['long_strike']}")
+                                else:
+                                    st.write(f"**Decision:** NO TRADE")
+                            
+                            st.write(f"**Reasoning:** {analysis['reasoning']}")
+                else:
+                    st.info("No analyses found for this run")
+            
+            with analysis_tab3:
+                st.subheader("🎯 Confidence Score Analysis")
+                if trades:
+                    confidence_df = backtest_db.get_confidence_analysis(selected_run_id)
+                    
+                    if not confidence_df.empty:
+                        # Confidence vs P&L scatter
+                        fig = px.scatter(confidence_df, x='confidence_score', y='realized_pnl',
+                                       color='exit_reason', title="Confidence Score vs P&L")
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Average P&L by confidence range
+                        confidence_df['confidence_range'] = pd.cut(confidence_df['confidence_score'],
+                                                                  bins=[0, 60, 70, 80, 90, 100],
+                                                                  labels=['<60', '60-70', '70-80', '80-90', '90-100'])
+                        
+                        avg_by_confidence = confidence_df.groupby('confidence_range')['realized_pnl'].agg(['mean', 'count'])
+                        
+                        st.subheader("Average P&L by Confidence Range")
+                        st.dataframe(avg_by_confidence)
+                    else:
+                        st.info("No confidence data available")
+                else:
+                    st.info("No trades to analyze")
+            
+            # Compare multiple runs
+            st.subheader("📊 Compare Multiple Runs")
+            if len(saved_runs) > 1:
+                compare_runs = st.multiselect(
+                    "Select runs to compare:",
+                    [r['run_id'] for r in saved_runs],
+                    default=[selected_run_id],
+                    format_func=lambda x: next((label for label, rid in run_options.items() if rid == x), f"Run {x}")
+                )
+                
+                if len(compare_runs) > 1:
+                    comparison_df = backtest_db.get_performance_comparison(compare_runs)
+                    
+                    # Performance metrics comparison
+                    metrics_fig = go.Figure()
+                    
+                    metrics = ['total_pnl', 'win_rate', 'sharpe_ratio', 'max_drawdown_pct']
+                    for metric in metrics:
+                        metrics_fig.add_trace(go.Bar(
+                            name=metric.replace('_', ' ').title(),
+                            x=comparison_df['run_id'].astype(str),
+                            y=comparison_df[metric]
+                        ))
+                    
+                    metrics_fig.update_layout(barmode='group', title="Performance Comparison")
+                    st.plotly_chart(metrics_fig, use_container_width=True)
 
 if __name__ == "__main__":
     main()
