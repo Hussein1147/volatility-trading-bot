@@ -3,6 +3,7 @@ Options Greeks calculator for delta-based strike selection
 """
 
 import numpy as np
+import pandas as pd
 from scipy.stats import norm
 from typing import Dict, Optional, Tuple
 import logging
@@ -94,6 +95,11 @@ class GreeksCalculator:
         # Convert positive delta to negative for puts
         if option_type == 'put' and target_delta > 0:
             target_delta = -target_delta
+            
+        # Check for valid inputs
+        if pd.isna(spot_price) or pd.isna(volatility) or pd.isna(time_to_expiry):
+            logger.error(f"Invalid inputs: spot_price={spot_price}, volatility={volatility}, time_to_expiry={time_to_expiry}")
+            return None
             
         # Initial guess based on rough approximation
         if option_type == 'put':

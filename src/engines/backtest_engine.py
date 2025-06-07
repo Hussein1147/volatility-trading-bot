@@ -21,7 +21,6 @@ from src.backtest.data_fetcher import AlpacaDataFetcher
 from src.core.position_sizer import DynamicPositionSizer
 from src.core.strike_selector import DeltaStrikeSelector
 from src.backtest.ai_provider import create_ai_provider
-from src.strategies.credit_spread import CreditSpreadStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +45,6 @@ class BacktestConfig:
     confidence_threshold: int = 70
     commission_per_contract: float = 0.65
     use_real_data: bool = True
-    dte_target: int = 9  # Target days to expiration
-    force_exit_days: int = 7  # Exit with this many days remaining
     
 @dataclass
 class BacktestTrade:
@@ -120,7 +117,7 @@ class BacktestEngine:
         # Synthetic pricing configuration
         self.method = method
         self.synthetic_pricing = synthetic_pricing or (method == "synthetic")
-        self.tier_targets = tier_targets or [0.50, 0.75, -2.50]  # Return-Boost v1: higher stop loss
+        self.tier_targets = tier_targets or [0.50, 0.75, -1.50]
         self.contracts_by_tier = contracts_by_tier or [0.4, 0.4, 0.2]
         self.force_exit_days = force_exit_days
         self.delta_target = delta_target
@@ -141,9 +138,6 @@ class BacktestEngine:
         # Initialize delta-based strike selector
         self.strike_selector = DeltaStrikeSelector(target_delta=delta_target)
         
-        # Initialize credit spread strategy for short-dated options
-        self.credit_spread_strategy = CreditSpreadStrategy(dte_target=config.dte_target, delta_target=delta_target)
-        
         # Rate limiting for API (5 requests per minute)
         self.last_api_calls = []
         self.max_api_calls_per_minute = 4  # Keep it under 5 to be safe
@@ -151,9 +145,6 @@ class BacktestEngine:
         
         # Track partial closes
         self.partial_closes: Dict[str, List[Dict]] = {}
-        
-        # Track all analyses for saving
-        self.all_analyses: List[Dict] = []
         
     def _calculate_simple_pnl(self, trade: BacktestTrade, days_in_trade: int) -> float:
         """Simple P&L calculation based on time decay and random market impact"""
@@ -328,14 +319,12 @@ class BacktestEngine:
                 )
                 
                 # Use real IV rank if available, otherwise use calculated value
-                if vol_data and 'iv_rank' in vol_data and not pd.isna(vol_data['iv_rank']):
-                    iv_rank = float(vol_data['iv_rank'])
+                if vol_data and 'iv_rank' in vol_data:
+                    iv_rank = vol_data['iv_rank']
                     logger.debug(f"Using real IV rank for {symbol}: {iv_rank:.1f}")
                 else:
                     # Fallback calculation
                     realized_vol = day_data.get('realized_vol', 20)
-                    if pd.isna(realized_vol):
-                        realized_vol = 20  # Default to 20% if NaN
                     iv_rank = min(max(realized_vol * 3, 50), 100)
                 
                 # Get technical indicators
@@ -390,35 +379,10 @@ class BacktestEngine:
         if self.progress_callback:
             self.progress_callback(self.progress)
             
-        iv_rank_str = f"{market_data['iv_rank']:.0f}" if not pd.isna(market_data['iv_rank']) else "N/A"
-        self._log_activity('analysis', f"Volatility event detected: {symbol} moved {market_data['percent_change']:.1f}% with IV rank {iv_rank_str}")
+        self._log_activity('analysis', f"Volatility event detected: {symbol} moved {market_data['percent_change']:.1f}% with IV rank {market_data['iv_rank']:.0f}")
         
         # Use Claude for analysis (same as live trading)
         analysis = await self._claude_analysis(market_data)
-        
-        # Store analysis for database
-        analysis_record = {
-            'timestamp': date,
-            'symbol': symbol,
-            'current_price': market_data['current_price'],
-            'percent_change': market_data['percent_change'],
-            'volume': market_data['volume'],
-            'iv_rank': market_data['iv_rank'],
-            'should_trade': False,
-            'confidence': 0,
-            'reasoning': 'No analysis available'
-        }
-        
-        if analysis:
-            analysis_record.update({
-                'should_trade': analysis['confidence'] >= self.config.confidence_threshold,
-                'confidence': analysis.get('confidence', 0),
-                'spread_type': analysis.get('spread_type'),
-                'reasoning': analysis.get('reasoning', 'No reasoning provided')
-            })
-            
-        # Store analysis record for later
-        self.pending_analysis = analysis_record
         
         if analysis and analysis['confidence'] >= self.config.confidence_threshold:
             self.progress.message = f"✨ Found opportunity: {symbol} {analysis['spread_type']}"
@@ -430,11 +394,6 @@ class BacktestEngine:
                 'market_data': market_data,
                 'analysis': analysis
             }
-        else:
-            # Save analysis even if no trade (confidence too low or no analysis)
-            if hasattr(self, 'pending_analysis') and self.pending_analysis:
-                self.all_analyses.append(self.pending_analysis)
-                self.pending_analysis = None
             
         return None
         
@@ -475,12 +434,6 @@ class BacktestEngine:
         
         Based on this data, should we enter a credit spread trade? If yes, what type?
         
-        Consider:
-        - For negative moves with high IV: put credit spreads may benefit from mean reversion
-        - For positive moves with high IV: call credit spreads may benefit from resistance levels
-        - RSI extremes: <30 oversold (favor puts), >70 overbought (favor calls)
-        - Price vs SMA: Below SMA with bounce potential (puts), Above SMA extended (calls)
-        
         Respond with a confidence score (0-100) and reasoning.
         Also recommend:
         1. Spread type (put_credit or call_credit)
@@ -497,18 +450,29 @@ class BacktestEngine:
         """
         
         try:
-            response = await self.ai_provider.analyze_trade(prompt)
+            response = await self.ai_provider.analyze_opportunity(prompt)
             self.last_api_calls.append(time.time())
             
-            # AI provider already returns parsed JSON dict
-            if response:
-                return {
-                    'confidence': response.get('confidence', 0),
-                    'spread_type': response.get('spread_type', 'put_credit'),
-                    'reasoning': response.get('reasoning', 'No reasoning provided')
-                }
+            # Parse response
+            import re
             
-            return None
+            # Extract confidence
+            conf_match = re.search(r'"confidence":\s*(\d+)', response)
+            confidence = int(conf_match.group(1)) if conf_match else 0
+            
+            # Extract spread type
+            spread_match = re.search(r'"spread_type":\s*"(put_credit|call_credit)"', response)
+            spread_type = spread_match.group(1) if spread_match else 'put_credit'
+            
+            # Extract reasoning
+            reason_match = re.search(r'"reasoning":\s*"([^"]+)"', response)
+            reasoning = reason_match.group(1) if reason_match else "No reasoning provided"
+            
+            return {
+                'confidence': confidence,
+                'spread_type': spread_type,
+                'reasoning': reasoning
+            }
             
         except Exception as e:
             logger.error(f"Claude analysis error: {e}")
@@ -534,57 +498,29 @@ class BacktestEngine:
             
             # Find strikes at target delta
             if analysis['spread_type'] == 'put_credit':
-                # Put credit spread: sell put closer to money, buy put further OTM
-                # Short strike at -delta_target (e.g., -0.16 delta)
-                try:
-                    short_strike = calc.find_strike_by_delta(
-                        spot_price=current_price, 
-                        target_delta=-self.delta_target,  # Negative for puts
-                        time_to_expiry=45/365,  # 45 DTE
-                        volatility=iv,
-                        option_type='put',
-                        strike_increment=1.0
-                    )
-                    
-                    if short_strike is None:
-                        # Fallback to percentage-based selection
-                        short_strike = round(current_price * 0.97)  # 3% OTM
-                        logger.warning(f"Delta-based strike selection failed for {symbol}, using 3% OTM: ${short_strike}")
-                        
-                    long_strike = short_strike - 1.0  # Long strike is $1 lower (further OTM)
-                    # Ensure proper ordering for put credit spread
-                    # For puts: we sell the higher strike and buy the lower strike
-                    if long_strike > short_strike:
-                        short_strike, long_strike = long_strike, short_strike
-                except Exception as e:
-                    logger.error(f"Error in strike selection for {symbol}: {e}")
-                    # Fallback to simple percentage-based selection
-                    short_strike = round(current_price * 0.97)  # 3% OTM
-                    long_strike = short_strike - 1.0
+                # Put spread - short strike at -delta_target
+                short_strike = calc.find_strike_by_delta(
+                    S=current_price, 
+                    delta_target=-self.delta_target,  # Negative for puts
+                    option_type='put',
+                    T=45/365,  # 45 DTE
+                    sigma=iv,
+                    r=0,
+                    strike_step=1.0
+                )
+                long_strike = short_strike - 1.0  # $1 wide
             else:
-                # Call credit spread: sell call closer to money, buy call further OTM
-                # Short strike at delta_target (e.g., 0.16 delta)
-                try:
-                    short_strike = calc.find_strike_by_delta(
-                        spot_price=current_price,
-                        target_delta=self.delta_target,
-                        time_to_expiry=45/365,  # 45 DTE
-                        volatility=iv,
-                        option_type='call',
-                        strike_increment=1.0
-                    )
-                    
-                    if short_strike is None:
-                        # Fallback to percentage-based selection
-                        short_strike = round(current_price * 1.03)  # 3% OTM
-                        logger.warning(f"Delta-based strike selection failed for {symbol}, using 3% OTM: ${short_strike}")
-                        
-                    long_strike = short_strike + 1.0  # Long strike is $1 higher (further OTM)
-                except Exception as e:
-                    logger.error(f"Error in strike selection for {symbol}: {e}")
-                    # Fallback to simple percentage-based selection
-                    short_strike = round(current_price * 1.03)  # 3% OTM
-                    long_strike = short_strike + 1.0
+                # Call spread - short strike at delta_target
+                short_strike = calc.find_strike_by_delta(
+                    S=current_price,
+                    delta_target=self.delta_target,
+                    option_type='call', 
+                    T=45/365,  # 45 DTE
+                    sigma=iv,
+                    r=0,
+                    strike_step=1.0
+                )
+                long_strike = short_strike + 1.0  # $1 wide
         else:
             # Original selection logic for real data
             short_strike = await self.strike_selector.select_strike(
@@ -612,9 +548,8 @@ class BacktestEngine:
             if real_options and 'options_chains' in real_options:
                 for chain in real_options['options_chains']:
                     if chain.get('short_strike') == short_strike and chain.get('long_strike') == long_strike:
-                        # Real options data should provide credit in dollars per contract
-                        credit_per_contract = chain.get('credit', 0.35) * 100  # Convert if needed
-                        max_loss_per_contract = (abs(long_strike - short_strike) * 100) - credit_per_contract
+                        credit_per_contract = chain.get('credit', 0.35)
+                        max_loss_per_contract = 1 - credit_per_contract
                         real_greeks = {
                             'short_delta': chain.get('short_delta', -0.15),
                             'long_delta': chain.get('long_delta', -0.05),
@@ -644,11 +579,8 @@ class BacktestEngine:
                 iv=iv
             )
             
-            # Spread price from synthetic pricer is already in dollars per share
-            # Convert to dollars per contract (multiply by 100)
-            credit_per_contract = spread_price * 100  # Convert to dollars per contract
-            credit_per_contract = max(1.0, credit_per_contract)  # Minimum $1 credit per contract
-            max_loss_per_contract = (abs(long_strike - short_strike) * 100) - credit_per_contract
+            credit_per_contract = spread_price
+            max_loss_per_contract = 1 - credit_per_contract
             real_greeks = {
                 'short_delta': short_delta,
                 'long_delta': long_delta,
@@ -657,31 +589,18 @@ class BacktestEngine:
         
         # Get position sizing from Claude with confidence weighting
         sizing = await self._claude_position_size(market_data, analysis)
-        base_risk_pct = sizing.get('risk_percentage', 0.03)
-        
-        # IV-aware dynamic sizing (Return-Boost v1)
-        iv_rank = market_data.get('iv_rank', 50)
-        iv_boost = max(1.0, min(2.0, iv_rank / 50.0))  # 50 → 1×, 90 → 1.8×, cap 2×
-        
-        # Apply boost and cap at 8%
-        risk_pct = base_risk_pct * iv_boost
-        risk_pct = min(risk_pct, 0.08) if risk_pct < 1 else min(risk_pct, 8.0)  # Handle both decimal and percentage
+        risk_pct = sizing.get('risk_percentage', 0.03)
         
         # Calculate contracts based on risk
         if risk_pct < 1:  # If it's a decimal (0.03), convert to percentage
             risk_pct = risk_pct * 100
             
         risk_amount = self.current_capital * (risk_pct / 100)
-        contracts = int(risk_amount / max_loss_per_contract)  # max_loss already in dollars
-        
-        logger.info(f"IV-aware sizing: IV={iv_rank:.0f}, boost={iv_boost:.1f}×, risk={risk_pct:.1%}")
-        
-        # Select expiry using credit spread strategy (Return-Boost v1: short-dated options)
-        expiry_date = self.credit_spread_strategy.select_expiry(date)
-        expiration_days = (expiry_date - date).days
+        contracts = int(risk_amount / (max_loss_per_contract * 100))
         
         # Determine book type based on confidence
         book_type = 'PRIMARY' if sizing.get('confidence_score', 0) >= 70 else 'INCOME_POP'
+        expiration_days = 60 if book_type == 'INCOME_POP' else 45
         
         # Ensure minimum 1 contract
         contracts = max(1, min(contracts, 20))  # Between 1 and 20 contracts
@@ -691,8 +610,8 @@ class BacktestEngine:
         current_positions = list(self.open_positions.values())
         
         # Calculate actual values with sized position
-        total_credit = credit_per_contract * contracts  # Already in dollars per contract
-        max_loss = max_loss_per_contract * contracts
+        total_credit = credit_per_contract * contracts * 100  # Convert to dollars
+        max_loss = max_loss_per_contract * contracts * 100
         
         # Update capital for position sizer
         self.position_sizer.update_account_balance(self.current_capital)
@@ -718,16 +637,6 @@ class BacktestEngine:
             entry_delta=real_greeks.get('short_delta', -0.15) if real_greeks else -0.15
         )
         
-        # Update pending analysis with strike info and append to all_analyses
-        if hasattr(self, 'pending_analysis') and self.pending_analysis:
-            self.pending_analysis['short_strike'] = short_strike
-            self.pending_analysis['long_strike'] = long_strike
-            self.pending_analysis['contracts'] = contracts
-            self.pending_analysis['expected_credit'] = total_credit
-            self.pending_analysis['spread_type'] = analysis['spread_type']
-            self.all_analyses.append(self.pending_analysis)
-            self.pending_analysis = None
-        
         # Store in open positions
         trade_id = f"{symbol}_{date.strftime('%Y%m%d_%H%M%S')}"
         self.open_positions[trade_id] = trade
@@ -749,7 +658,6 @@ class BacktestEngine:
         logger.info(f"BACKTEST TRADE: {symbol} {analysis['spread_type']} "
                    f"{short_strike}/{long_strike} (delta {self.delta_target:.2f} targets) "
                    f"x{contracts} for ${total_credit:.2f} credit | "
-                   f"Expiry: {expiry_date.strftime('%Y-%m-%d')} ({expiration_days} DTE) | "
                    f"Confidence: {confidence_score}% ({confidence_tier}) | "
                    f"Risk: {risk_pct*100 if risk_pct < 1 else risk_pct:.1f}% | "
                    f"Pricing: {'Synthetic' if self.synthetic_pricing else 'Real'}")
@@ -783,10 +691,6 @@ class BacktestEngine:
         for trade_id, trade in self.open_positions.items():
             days_in_trade = (current_date - trade.entry_time).days
             
-            # Skip management on entry day to avoid immediate stops
-            if days_in_trade == 0:
-                continue
-            
             # Calculate current P&L
             if self.synthetic_pricing and self.synthetic_pricer:
                 # Get current underlying price
@@ -816,36 +720,15 @@ class BacktestEngine:
                         iv=iv
                     )
                     
-                    # P&L = entry credit - cost to close
-                    # current_spread_price is what we'd receive to open the same spread now
-                    # To close our short spread, we need to buy it back
-                    cost_to_close = current_spread_price * 100 * trade.contracts
-                    
-                    # P&L = what we received - what we pay to close
-                    current_pnl = trade.entry_credit - cost_to_close
+                    # P&L = entry credit - current cost to close
+                    # current_spread_price is the credit we'd receive if opening now
+                    # To close, we'd pay this amount
+                    current_pnl = (trade.entry_credit - current_spread_price * 100 * trade.contracts)
                 else:
-                    # If no current price data, use entry price with some random walk
-                    current_price = trade.entry_time  # This was meant to be a price, let's fix
-                    # Use a simple random walk from entry price
-                    price_at_entry = (trade.short_strike + trade.long_strike) / 2
-                    volatility = self.synthetic_pricer.get_cached_iv(trade.symbol) or 0.25
-                    daily_vol = volatility / np.sqrt(252)
-                    price_change = np.random.normal(0, daily_vol * np.sqrt(days_in_trade))
-                    current_price = price_at_entry * (1 + price_change)
-                    
-                    # Now calculate with synthetic pricer
-                    expiry = trade.entry_time + timedelta(days=trade.expiration_days)
-                    current_spread_price = self.synthetic_pricer.price_spread(
-                        date=pd.Timestamp(current_date),
-                        underlying_price=current_price,
-                        strikes=(trade.short_strike, trade.long_strike),
-                        expiry=pd.Timestamp(expiry),
-                        iv=volatility
-                    )
-                    cost_to_close = current_spread_price * 100 * trade.contracts
-                    current_pnl = trade.entry_credit - cost_to_close
+                    # Fallback to simple calculation
+                    current_pnl = self._calculate_simple_pnl(trade, days_in_trade)
             else:
-                # Not using synthetic pricing - use simple calculation
+                # Original simple P&L calculation
                 current_pnl = self._calculate_simple_pnl(trade, days_in_trade)
             
             # Check exit conditions with enhanced rules
@@ -858,11 +741,9 @@ class BacktestEngine:
             
             # HARD STOPS (apply to all positions)
             # 1. Stop loss at tier_targets[2] (default -150%) of credit received
-            # For a credit spread, max loss is when we lose 150% of the credit we received
-            # e.g., if we received $100 credit, stop at -$150 loss
-            if current_pnl <= -abs(trade.entry_credit * abs(self.tier_targets[2])):
+            if current_pnl <= trade.entry_credit * self.tier_targets[2]:
                 exit_reason = f"Stop Loss ({self.tier_targets[2]*100:.0f}%)"
-                current_pnl = -abs(trade.entry_credit * abs(self.tier_targets[2]))  # Cap loss
+                current_pnl = trade.entry_credit * self.tier_targets[2]  # Cap loss
                 contracts_to_close = trade.contracts
                 
             # 2. Delta stop at 0.30 (would need real-time Greeks)

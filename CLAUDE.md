@@ -35,10 +35,10 @@ python3 scripts/tests/verify_backtest_fixes.py
 ## Dashboard Launch Commands
 ```bash
 # Main trading dashboard
-python3 -m streamlit run src/ui/dashboard.py --server.port 8501
+nohup python3 -m streamlit run src/ui/dashboard.py --server.port 8501 &
 
 # Backtesting dashboard
-python3 -m streamlit run src/ui/backtest_dashboard.py --server.port 8502
+nohup python3 -m streamlit run src/ui/backtest_dashboard.py --server.port 8502 &
 ```
 
 ## Recent Fixes

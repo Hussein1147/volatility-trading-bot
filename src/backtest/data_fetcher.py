@@ -317,7 +317,15 @@ class AlpacaDataFetcher:
             df_reset = df_reset[df_reset['symbol'] == symbol]
         
         # Convert timestamp to date for filtering
-        df_reset['date'] = pd.to_datetime(df_reset['timestamp']).dt.date
+        # Handle case where timestamp might already be datetime
+        if 'timestamp' in df_reset.columns:
+            # Ensure timestamp is datetime
+            df_reset['timestamp'] = pd.to_datetime(df_reset['timestamp'])
+            df_reset['date'] = df_reset['timestamp'].dt.date
+        else:
+            # If no timestamp column, create date from index
+            df_reset['date'] = pd.Series(df_reset.index).dt.date.values
+        
         current_date_data = df_reset[df_reset['date'] == date.date()]
         
         if current_date_data.empty:

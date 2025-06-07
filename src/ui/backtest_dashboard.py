@@ -19,8 +19,7 @@ import json
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
-from src.backtest.backtest_engine import BacktestConfig
-from src.backtest.backtest_engine_with_logging import BacktestEngineWithLogging, ActivityLogEntry
+from src.backtest.backtest_engine import BacktestConfig, BacktestEngine, ActivityLogEntry
 from src.backtest.visualizer import BacktestVisualizer
 from src.backtest.advanced_visualizer import AdvancedBacktestVisualizer
 from src.data.backtest_db import backtest_db
@@ -50,6 +49,7 @@ st.markdown("""
     .log-trade { color: #2196F3; }
     .log-warning { color: #FF9800; }
     .log-error { color: #F44336; }
+    .log-analysis { color: #9C27B0; }
     
     /* Progress bar styling */
     .stProgress > div > div > div > div {
@@ -73,7 +73,8 @@ def format_activity_entry(entry: ActivityLogEntry) -> str:
         "info": "ℹ️",
         "trade": "💰",
         "warning": "⚠️",
-        "error": "❌"
+        "error": "❌",
+        "analysis": "🔍"
     }.get(entry.type, "📝")
     
     return f"{time_str} {icon} {entry.message}"
@@ -102,26 +103,44 @@ async def run_backtest_async(config: BacktestConfig, progress_container, log_con
                 log_html += '</div>'
                 st.markdown(log_html, unsafe_allow_html=True)
     
-    def progress_callback(current: int, total: int, message: str):
-        st.session_state.current_progress = {
-            "current": current,
-            "total": total,
-            "message": message
-        }
-        
-        # Update progress display
-        if total > 0:
-            progress_value = current / total
-            progress_text = f"Day {current}/{total} - {message}"
-            progress_container.progress(progress_value, text=progress_text)
+    def progress_callback(progress):
+        # Handle both old-style (3 args) and new-style (BacktestProgress object) callbacks
+        if hasattr(progress, 'current_day'):
+            # New style - BacktestProgress object
+            st.session_state.current_progress = {
+                "current": progress.current_day,
+                "total": progress.total_days,
+                "message": progress.message or progress.get_status_message()
+            }
+            
+            if progress.total_days > 0:
+                progress_value = progress.progress_percent
+                progress_text = progress.message or progress.get_status_message()
+                progress_container.progress(progress_value, text=progress_text)
+            else:
+                progress_container.progress(0.0, text="Initializing...")
         else:
-            progress_container.progress(0.0, text="Initializing...")
+            # Old style - 3 arguments (for backward compatibility)
+            # This shouldn't happen with new BacktestEngine
+            progress_container.progress(0.5, text="Processing...")
     
-    # Create engine with callbacks
-    engine = BacktestEngineWithLogging(
+    # Get pricing parameters from session state
+    synthetic_pricing = st.session_state.get('synthetic_pricing', True)
+    delta_target = st.session_state.get('delta_target', 0.16)
+    tier_targets = st.session_state.get('tier_targets', [0.50, 0.75, -1.50])
+    contracts_by_tier = st.session_state.get('contracts_by_tier', [0.4, 0.4, 0.2])
+    force_exit_days = st.session_state.get('force_exit_days', 21)
+    
+    # Create engine with AI-powered decisions (Claude Sonnet 4)
+    engine = BacktestEngine(
         config,
+        progress_callback=progress_callback,
         activity_callback=activity_callback,
-        progress_callback=progress_callback
+        synthetic_pricing=synthetic_pricing,
+        delta_target=delta_target,
+        tier_targets=tier_targets,
+        contracts_by_tier=contracts_by_tier,
+        force_exit_days=force_exit_days
     )
     
     # Run backtest
@@ -129,6 +148,40 @@ async def run_backtest_async(config: BacktestConfig, progress_container, log_con
     
     # Store results
     st.session_state.backtest_results = results
+    
+    # Save to database if we have results
+    if results and results.total_trades > 0:
+        from src.data.backtest_db import backtest_db
+        run_id = backtest_db.save_backtest_run(config, results, notes="AI-powered backtest")
+        st.session_state.last_run_id = run_id
+        
+        # Save all analyses from the engine
+        if hasattr(engine, 'all_analyses'):
+            for analysis in engine.all_analyses:
+                backtest_db.save_analysis(
+                    run_id=run_id,
+                    timestamp=analysis['timestamp'],
+                    symbol=analysis['symbol'],
+                    market_data={
+                        'current_price': analysis['current_price'],
+                        'percent_change': analysis['percent_change'],
+                        'volume': analysis['volume'],
+                        'iv_rank': analysis['iv_rank']
+                    },
+                    analysis={
+                        'should_trade': analysis['should_trade'],
+                        'spread_type': analysis.get('spread_type'),
+                        'short_strike': analysis.get('short_strike'),
+                        'long_strike': analysis.get('long_strike'),
+                        'contracts': analysis.get('contracts'),
+                        'expected_credit': analysis.get('expected_credit'),
+                        'confidence': analysis['confidence'],
+                        'reasoning': analysis['reasoning']
+                    }
+                )
+        
+        # Store run_id in results for later reference
+        results.run_id = run_id
     
     return results
 
@@ -158,15 +211,20 @@ def main():
         with col1:
             start_date = st.date_input(
                 "Start Date",
-                value=datetime(2024, 11, 1).date(),
+                value=datetime(2024, 8, 1).date(),
                 max_value=datetime.now().date()
             )
         with col2:
             end_date = st.date_input(
                 "End Date",
-                value=datetime(2024, 11, 8).date(),
+                value=datetime(2024, 8, 31).date(),
                 max_value=datetime.now().date()
             )
+            
+        # Validate dates
+        if start_date >= end_date:
+            st.error("❌ End date must be after start date!")
+            st.stop()
             
         # Symbol selection
         st.subheader("🎯 Symbols")
@@ -195,6 +253,38 @@ def main():
             step=0.5
         )
         
+        # Short-dated options configuration
+        st.subheader("📊 Options Configuration")
+        dte_target = st.slider(
+            "Target DTE (days)",
+            min_value=7,
+            max_value=21,
+            value=9,
+            help="Target days to expiration for new trades. Nearest Friday >= target will be selected."
+        )
+        
+        # Force exit adjustment based on DTE
+        if dte_target <= 10:
+            force_exit_default = 7
+        else:
+            force_exit_default = 21
+        
+        force_exit_days = st.number_input(
+            "Force Exit (DTE)",
+            min_value=1,
+            max_value=21,
+            value=force_exit_default,
+            help=f"Exit positions with {force_exit_default} days remaining (adjusted for short-dated options)"
+        )
+        
+        # IV-aware sizing info
+        st.info(
+            "💡 **IV-Aware Sizing**: Position size increases with IV rank\n"
+            "- IV 50 → 1.0× base size\n"
+            "- IV 90 → 1.8× base size\n"
+            "- Hard cap at 8% of equity"
+        )
+        
         st.subheader("📊 Strategy Parameters")
         min_iv_rank = st.slider(
             "Min IV Rank",
@@ -220,6 +310,81 @@ def main():
             step=5
         )
         
+        st.subheader("💰 Pricing Options")
+        synthetic_pricing = st.checkbox(
+            "Use Synthetic Pricing",
+            value=True,
+            help="Use Black-Scholes model for option pricing instead of real market data"
+        )
+        
+        if synthetic_pricing:
+            st.info("🔬 Prices will be derived from proxy Black-Scholes calculations")
+            
+            delta_target = st.slider(
+                "Target Delta",
+                min_value=0.10,
+                max_value=0.30,
+                value=0.16,
+                step=0.01,
+                help="Delta target for strike selection (0.16 = 16% ITM probability)"
+            )
+        else:
+            delta_target = 0.16
+            
+        # Advanced exit rules (expandable)
+        with st.expander("🎯 Enhanced Exit Rules (Return-Boost v1)"):
+            st.markdown("**New tiered exit targets for improved returns:**")
+            st.write("- **Tier 1 (40% contracts)**: Exit at +50% of credit received")
+            st.write("- **Tier 2 (40% contracts)**: Exit at +75% of credit received")
+            st.write("- **Stop Loss**: -250% of credit (allows more room)")
+            st.write("- **Final 20% contracts**: Ride to +150% potential profit")
+            st.info("💡 The enhanced -250% stop allows the final portion to capture larger moves")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                tier1_target = st.number_input(
+                    "Tier 1 Target (%)",
+                    min_value=20,
+                    max_value=100,
+                    value=50,
+                    step=5,
+                    help="First profit target as % of max profit"
+                )
+                tier2_target = st.number_input(
+                    "Tier 2 Target (%)",
+                    min_value=tier1_target,
+                    max_value=100,
+                    value=75,
+                    step=5,
+                    help="Second profit target as % of max profit"
+                )
+                stop_loss = st.number_input(
+                    "Stop Loss (%)",
+                    min_value=-300,
+                    max_value=-50,
+                    value=-250,
+                    step=10,
+                    help="Stop loss as % of credit received (negative)"
+                )
+                
+            with col2:
+                tier1_contracts = st.slider(
+                    "Tier 1 Contracts (%)",
+                    min_value=10,
+                    max_value=70,
+                    value=40,
+                    step=10,
+                    help="% of contracts to close at Tier 1"
+                )
+                tier2_contracts = st.slider(
+                    "Tier 2 Contracts (%)",
+                    min_value=10,
+                    max_value=70,
+                    value=40,
+                    step=10,
+                    help="% of contracts to close at Tier 2"
+                )
+        
         # Run button
         run_clicked = st.button("🚀 Run Backtest", type="primary", use_container_width=True)
     
@@ -242,7 +407,9 @@ def main():
                     min_price_move=min_price_move,
                     confidence_threshold=confidence_threshold,
                     commission_per_contract=0.65,
-                    use_real_data=True
+                    use_real_data=True,
+                    dte_target=dte_target,
+                    force_exit_days=force_exit_days
                 )
                 
                 st.header("🔄 Running Backtest")
@@ -258,6 +425,29 @@ def main():
                 st.subheader("📋 Activity Log")
                 log_container = st.empty()
                 
+                # Store pricing parameters in session state
+                st.session_state['synthetic_pricing'] = synthetic_pricing
+                st.session_state['delta_target'] = delta_target if synthetic_pricing else 0.16
+                
+                # Store exit rule parameters if expanded
+                if 'tier1_target' in locals():
+                    st.session_state['tier_targets'] = [
+                        tier1_target / 100,
+                        tier2_target / 100,
+                        stop_loss / 100
+                    ]
+                    st.session_state['contracts_by_tier'] = [
+                        tier1_contracts / 100,
+                        tier2_contracts / 100,
+                        1 - (tier1_contracts + tier2_contracts) / 100
+                    ]
+                    st.session_state['force_exit_days'] = force_exit_days
+                else:
+                    # Use defaults from Return-Boost v1
+                    st.session_state['tier_targets'] = [0.50, 0.75, -2.50]
+                    st.session_state['contracts_by_tier'] = [0.4, 0.4, 0.2]
+                    st.session_state['force_exit_days'] = force_exit_days
+                    
                 # Run backtest
                 asyncio.run(run_backtest_async(config, progress_container, log_container))
                 
@@ -271,6 +461,15 @@ def main():
             
             # Performance summary
             st.header("📊 Performance Summary")
+            
+            # Show pricing method indicator
+            if hasattr(results, 'trades') and results.trades:
+                # Check if any trades used synthetic pricing
+                synthetic_used = st.session_state.get('synthetic_pricing', False)
+                if synthetic_used:
+                    st.info("🔬 Results calculated using **synthetic Black-Scholes pricing**")
+                else:
+                    st.success("📈 Results calculated using **real market data**")
             
             col1, col2, col3, col4, col5, col6 = st.columns(6)
             
@@ -568,7 +767,7 @@ def main():
                                                                   bins=[0, 60, 70, 80, 90, 100],
                                                                   labels=['<60', '60-70', '70-80', '80-90', '90-100'])
                         
-                        avg_by_confidence = confidence_df.groupby('confidence_range')['realized_pnl'].agg(['mean', 'count'])
+                        avg_by_confidence = confidence_df.groupby('confidence_range', observed=False)['realized_pnl'].agg(['mean', 'count'])
                         
                         st.subheader("Average P&L by Confidence Range")
                         st.dataframe(avg_by_confidence)
