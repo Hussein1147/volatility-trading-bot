@@ -217,6 +217,10 @@ class BacktestVisualizer:
             height=400
         )
         
+        # Add axes labels for the bar chart
+        fig.update_xaxes(title_text="Exit Reason", row=1, col=2)
+        fig.update_yaxes(title_text="Average P&L ($)", row=1, col=2)
+        
         return fig
         
     def plot_trade_timeline(self) -> go.Figure:

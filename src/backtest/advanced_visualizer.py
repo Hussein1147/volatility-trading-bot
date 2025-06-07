@@ -394,6 +394,97 @@ class AdvancedBacktestVisualizer:
         
         return win_rates
     
+    def plot_confidence_breakdown(self) -> go.Figure:
+        """Visualize confidence score breakdowns for all trades"""
+        if not self.trades or not any(hasattr(t, 'confidence_breakdown') for t in self.trades):
+            return self._empty_chart("No confidence breakdown data available")
+        
+        # Collect confidence components
+        components = {
+            'IV Rank': [],
+            'Price Move': [],
+            'Volume': [],
+            'Spread Selection': [],
+            'Strike Distance': [],
+            'Position Sizing': [],
+            'Expiration': [],
+            'Support/Resistance': [],
+            'Total Score': []
+        }
+        
+        trade_labels = []
+        
+        for i, trade in enumerate(self.trades):
+            if hasattr(trade, 'confidence_breakdown') and trade.confidence_breakdown:
+                breakdown = trade.confidence_breakdown
+                trade_labels.append(f"{trade.symbol} {trade.entry_time.strftime('%m/%d')}")
+                
+                # Extract scores from breakdown
+                market = breakdown.get('market_conditions', {})
+                strategy = breakdown.get('strategy_alignment', {})
+                risk = breakdown.get('risk_management', {})
+                tech = breakdown.get('technical_factors', {})
+                
+                components['IV Rank'].append(market.get('iv_rank', 0))
+                components['Price Move'].append(market.get('price_move', 0))
+                components['Volume'].append(market.get('volume', 0))
+                components['Spread Selection'].append(strategy.get('spread_selection', 0))
+                components['Strike Distance'].append(strategy.get('strike_distance', 0))
+                components['Position Sizing'].append(risk.get('position_sizing', 0))
+                components['Expiration'].append(risk.get('expiration', 0))
+                components['Support/Resistance'].append(tech.get('support_resistance', 0))
+                components['Total Score'].append(trade.confidence_score)
+        
+        # Create stacked bar chart
+        fig = go.Figure()
+        
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
+                  '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22']
+        
+        for i, (component, values) in enumerate(components.items()):
+            if component != 'Total Score':
+                fig.add_trace(go.Bar(
+                    name=component,
+                    x=trade_labels,
+                    y=values,
+                    marker_color=colors[i % len(colors)]
+                ))
+        
+        # Add total score line
+        fig.add_trace(go.Scatter(
+            name='Total Score',
+            x=trade_labels,
+            y=components['Total Score'],
+            mode='lines+markers',
+            line=dict(color='white', width=3),
+            yaxis='y2'
+        ))
+        
+        # Update layout
+        fig.update_layout(
+            title="Confidence Score Breakdown by Trade",
+            barmode='stack',
+            template='plotly_dark',
+            height=600,
+            xaxis_title="Trades",
+            yaxis_title="Component Scores",
+            yaxis2=dict(
+                title="Total Confidence Score",
+                overlaying='y',
+                side='right',
+                range=[0, 100]
+            ),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+        
+        return fig
+    
     def _empty_chart(self, message: str) -> go.Figure:
         """Create empty chart with message"""
         fig = go.Figure()

@@ -17,6 +17,10 @@ from alpaca.data.requests import (
 from alpaca.data.timeframe import TimeFrame
 from dotenv import load_dotenv
 
+# Import our real data sources
+from src.backtest.tastytrade_api import TastyTradeDataFetcher
+from src.backtest.polygon_options_fetcher import PolygonOptionsFetcher
+
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -50,6 +54,23 @@ class AlpacaDataFetcher:
             logger.warning("Will use simulated options data")
             self.has_options_access = False
             self.options_client = None
+        
+        # Initialize additional real data sources
+        self.tastytrade_fetcher = TastyTradeDataFetcher()
+        self.polygon_fetcher = PolygonOptionsFetcher()
+        
+        logger.info("Initialized real data sources: Alpaca, TastyTrade, and Polygon")
+    
+    def calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
+        """Calculate Relative Strength Index (RSI)"""
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        return rsi
             
     async def get_stock_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """Get historical stock price data"""
@@ -72,6 +93,10 @@ class AlpacaDataFetcher:
             # Calculate realized volatility (20-day)
             df['realized_vol'] = df['daily_return'].rolling(20).std() * np.sqrt(252) * 100
             
+            # Calculate technical indicators
+            df['sma_20'] = df['close'].rolling(window=20).mean()
+            df['rsi_14'] = self.calculate_rsi(df['close'], period=14)
+            
             return df
             
         except Exception as e:
@@ -82,16 +107,25 @@ class AlpacaDataFetcher:
                                dte_min: int = 7, dte_max: int = 45) -> List[Dict]:
         """Get options chain for a specific date
         
-        Uses real Alpaca data for dates after Feb 2024, simulation for earlier dates.
+        Priority order:
+        1. Polygon (for historical data)
+        2. Alpaca (for dates after Feb 2024)
+        3. Simulation (only as last resort)
         """
         
+        # Try Polygon first for historical data
+        polygon_chain = await self._get_polygon_options_chain(symbol, date, dte_min, dte_max)
+        if polygon_chain:
+            logger.info(f"Using real Polygon options data for {symbol} on {date.date()}")
+            return polygon_chain
+            
         # Check if date is before Alpaca options data availability
         if date < self.OPTIONS_DATA_START_DATE:
-            logger.info(f"Date {date.date()} is before Alpaca options data availability - using simulation")
+            logger.warning(f"Date {date.date()} is before Alpaca options data availability and no Polygon data found")
             return self._simulate_options_chain(symbol, date, dte_min, dte_max)
             
         if not self.has_options_access:
-            # Return simulated options chain
+            logger.warning("No Alpaca options access - falling back to simulation")
             return self._simulate_options_chain(symbol, date, dte_min, dte_max)
             
         try:
@@ -129,6 +163,18 @@ class AlpacaDataFetcher:
                         latest_quote = snapshot.latest_quote
                         latest_trade = snapshot.latest_trade
                         
+                        # Extract Greeks if available
+                        greeks_data = {}
+                        if hasattr(snapshot, 'greeks') and snapshot.greeks:
+                            greeks_data = {
+                                'delta': float(snapshot.greeks.delta) if hasattr(snapshot.greeks, 'delta') else None,
+                                'gamma': float(snapshot.greeks.gamma) if hasattr(snapshot.greeks, 'gamma') else None,
+                                'theta': float(snapshot.greeks.theta) if hasattr(snapshot.greeks, 'theta') else None,
+                                'vega': float(snapshot.greeks.vega) if hasattr(snapshot.greeks, 'vega') else None,
+                                'rho': float(snapshot.greeks.rho) if hasattr(snapshot.greeks, 'rho') else None
+                            }
+                            logger.debug(f"Found Alpaca Greeks for {option_symbol}: delta={greeks_data['delta']}")
+                        
                         options_data.append({
                             'symbol': option_symbol,
                             'underlying': underlying,
@@ -140,16 +186,36 @@ class AlpacaDataFetcher:
                             'mid': (float(latest_quote.bid_price or 0) + float(latest_quote.ask_price or 0)) / 2,
                             'volume': int(latest_trade.size) if latest_trade and latest_trade.size else 0,
                             'open_interest': 0,  # Not available in snapshot
-                            'implied_volatility': float(snapshot.implied_volatility) if snapshot.implied_volatility else 0.25
+                            'implied_volatility': float(snapshot.implied_volatility) if snapshot.implied_volatility else 0.25,
+                            'delta': greeks_data.get('delta'),
+                            'gamma': greeks_data.get('gamma'),
+                            'theta': greeks_data.get('theta'),
+                            'vega': greeks_data.get('vega'),
+                            'rho': greeks_data.get('rho')
                         })
                     except Exception as e:
                         logger.debug(f"Error parsing option symbol {option_symbol}: {e}")
                         continue
                 
+            # If we got some data but no Greeks, try to get from Polygon snapshot
+            if options_data and any(opt['delta'] is None for opt in options_data):
+                logger.info("Alpaca data missing Greeks - trying Polygon snapshot")
+                polygon_greeks = await self._get_polygon_greeks_snapshot(symbol)
+                if polygon_greeks:
+                    # Merge Greeks data
+                    for opt in options_data:
+                        if opt['symbol'] in polygon_greeks:
+                            opt.update(polygon_greeks[opt['symbol']])
+                            
             return options_data
             
         except Exception as e:
-            logger.error(f"Error fetching options chain: {e}")
+            logger.error(f"Error fetching Alpaca options chain: {e}")
+            # Try Polygon as fallback
+            polygon_chain = await self._get_polygon_options_chain(symbol, date, dte_min, dte_max)
+            if polygon_chain:
+                return polygon_chain
+            # Last resort: simulation
             return self._simulate_options_chain(symbol, date, dte_min, dte_max)
             
     def _simulate_options_chain(self, symbol: str, date: datetime, 
@@ -225,6 +291,10 @@ class AlpacaDataFetcher:
                         'open_interest': np.random.randint(100, 5000),
                         'implied_volatility': base_iv,
                         'delta': delta,
+                        'gamma': abs(delta) * 0.1 * np.exp(-abs(moneyness) * 2),
+                        'theta': -time_premium / dte if dte > 0 else -0.01,
+                        'vega': abs(delta) * time_value * 0.5,
+                        'rho': delta * time_value * 0.01,
                         'dte': dte
                     })
                     
@@ -247,7 +317,15 @@ class AlpacaDataFetcher:
             df_reset = df_reset[df_reset['symbol'] == symbol]
         
         # Convert timestamp to date for filtering
-        df_reset['date'] = pd.to_datetime(df_reset['timestamp']).dt.date
+        # Handle case where timestamp might already be datetime
+        if 'timestamp' in df_reset.columns:
+            # Ensure timestamp is datetime
+            df_reset['timestamp'] = pd.to_datetime(df_reset['timestamp'])
+            df_reset['date'] = df_reset['timestamp'].dt.date
+        else:
+            # If no timestamp column, create date from index
+            df_reset['date'] = pd.Series(df_reset.index).dt.date.values
+        
         current_date_data = df_reset[df_reset['date'] == date.date()]
         
         if current_date_data.empty:
@@ -271,39 +349,46 @@ class AlpacaDataFetcher:
         else:
             hv_30 = 20  # Default
         
-        # Calculate IV rank using rolling 20-day volatilities
-        if len(returns) >= 252:  # Need at least a year of data
-            rolling_vols = []
-            for i in range(20, len(returns)):
-                vol = returns.iloc[i-20:i].std() * np.sqrt(252) * 100
-                rolling_vols.append(vol)
-            
-            rolling_vols = np.array(rolling_vols)
-            current_hv = hv_20
-            
-            # IV Rank calculation
-            min_vol = rolling_vols.min()
-            max_vol = rolling_vols.max()
-            
-            if max_vol > min_vol:
-                iv_rank = ((current_hv - min_vol) / (max_vol - min_vol)) * 100
-                iv_percentile = (rolling_vols < current_hv).sum() / len(rolling_vols) * 100
-            else:
-                iv_rank = 50
-                iv_percentile = 50
+        # Try to get real IV rank from TastyTrade first
+        tastytrade_iv_rank = await self._get_tastytrade_iv_rank(symbol, date)
+        if tastytrade_iv_rank is not None:
+            logger.info(f"Using real TastyTrade IV rank for {symbol}: {tastytrade_iv_rank}")
+            iv_rank = tastytrade_iv_rank
+            iv_percentile = iv_rank + np.random.uniform(-5, 5)  # Approximate percentile
         else:
-            # Not enough data - use simulated IV rank based on move size
-            move_size = abs(current_date_data['percent_change'].iloc[0])
-            if move_size > 2.0:
-                iv_rank = 80 + np.random.uniform(-10, 10)
-            elif move_size > 1.5:
-                iv_rank = 70 + np.random.uniform(-10, 10)
-            elif move_size > 1.0:
-                iv_rank = 60 + np.random.uniform(-10, 10)
+            # Calculate IV rank using rolling 20-day volatilities
+            if len(returns) >= 252:  # Need at least a year of data
+                rolling_vols = []
+                for i in range(20, len(returns)):
+                    vol = returns.iloc[i-20:i].std() * np.sqrt(252) * 100
+                    rolling_vols.append(vol)
+                
+                rolling_vols = np.array(rolling_vols)
+                current_hv = hv_20
+                
+                # IV Rank calculation
+                min_vol = rolling_vols.min()
+                max_vol = rolling_vols.max()
+                
+                if max_vol > min_vol:
+                    iv_rank = ((current_hv - min_vol) / (max_vol - min_vol)) * 100
+                    iv_percentile = (rolling_vols < current_hv).sum() / len(rolling_vols) * 100
+                else:
+                    iv_rank = 50
+                    iv_percentile = 50
             else:
-                iv_rank = 50 + np.random.uniform(-10, 10)
-            
-            iv_percentile = iv_rank + np.random.uniform(-5, 5)
+                # Not enough data - use simulated IV rank based on move size
+                move_size = abs(current_date_data['percent_change'].iloc[0])
+                if move_size > 2.0:
+                    iv_rank = 80 + np.random.uniform(-10, 10)
+                elif move_size > 1.5:
+                    iv_rank = 70 + np.random.uniform(-10, 10)
+                elif move_size > 1.0:
+                    iv_rank = 60 + np.random.uniform(-10, 10)
+                else:
+                    iv_rank = 50 + np.random.uniform(-10, 10)
+                
+                iv_percentile = iv_rank + np.random.uniform(-5, 5)
             
         return {
             'date': date,
@@ -350,6 +435,39 @@ class AlpacaDataFetcher:
                     volatility_events.append(event)
                     
         return volatility_events
+    
+    async def get_technical_indicators(self, symbol: str, date: datetime) -> Dict:
+        """Get technical indicators for a specific date"""
+        # Get 30 days of history to calculate indicators
+        start_date = date - timedelta(days=30)
+        df = await self.get_stock_data(symbol, start_date, date)
+        
+        if df.empty:
+            return {}
+        
+        # Handle MultiIndex
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.reset_index()
+            if 'symbol' in df.columns:
+                df = df[df['symbol'] == symbol]
+            df['date'] = pd.to_datetime(df['timestamp']).dt.date
+        else:
+            df = df.reset_index()
+            df['date'] = pd.to_datetime(df.index).date
+        
+        # Get the latest data
+        latest_data = df[df['date'] <= date.date()].iloc[-1] if len(df) > 0 else None
+        
+        if latest_data is None:
+            return {}
+        
+        return {
+            'price': float(latest_data['close']),
+            'sma_20': float(latest_data['sma_20']) if not pd.isna(latest_data['sma_20']) else None,
+            'rsi_14': float(latest_data['rsi_14']) if not pd.isna(latest_data['rsi_14']) else None,
+            'volume': int(latest_data['volume']),
+            'date': date
+        }
         
     def calculate_option_spreads(self, options_chain: List[Dict], 
                                spread_type: str, current_price: float) -> List[Dict]:
@@ -399,3 +517,99 @@ class AlpacaDataFetcher:
                     break
                     
         return spreads
+        
+    async def _get_polygon_options_chain(self, symbol: str, date: datetime,
+                                        dte_min: int, dte_max: int) -> Optional[List[Dict]]:
+        """Get options chain from Polygon"""
+        try:
+            polygon_data = await self.polygon_fetcher.get_options_chain(symbol, date, dte_min, dte_max)
+            if not polygon_data:
+                return None
+                
+            options_data = []
+            for expiry, expiry_data in polygon_data.items():
+                exp_date = datetime.strptime(expiry, '%Y-%m-%d').date()
+                dte = expiry_data['dte']
+                
+                # Process calls
+                for strike, call_data in expiry_data['calls'].items():
+                    options_data.append({
+                        'symbol': call_data['symbol'],
+                        'underlying': symbol,
+                        'strike': strike,
+                        'expiration': exp_date,
+                        'type': 'call',
+                        'bid': call_data.get('bid', 0),
+                        'ask': call_data.get('ask', 0),
+                        'mid': call_data.get('mid', 0),
+                        'volume': call_data.get('volume', 0),
+                        'open_interest': 0,  # Not available in historical
+                        'implied_volatility': 0.25,  # Default
+                        'delta': None,  # Will try to get from snapshot
+                        'gamma': None,
+                        'theta': None,
+                        'vega': None,
+                        'rho': None,
+                        'dte': dte
+                    })
+                    
+                # Process puts
+                for strike, put_data in expiry_data['puts'].items():
+                    options_data.append({
+                        'symbol': put_data['symbol'],
+                        'underlying': symbol,
+                        'strike': strike,
+                        'expiration': exp_date,
+                        'type': 'put',
+                        'bid': put_data.get('bid', 0),
+                        'ask': put_data.get('ask', 0),
+                        'mid': put_data.get('mid', 0),
+                        'volume': put_data.get('volume', 0),
+                        'open_interest': 0,
+                        'implied_volatility': 0.25,
+                        'delta': None,
+                        'gamma': None,
+                        'theta': None,
+                        'vega': None,
+                        'rho': None,
+                        'dte': dte
+                    })
+                    
+            return options_data if options_data else None
+            
+        except Exception as e:
+            logger.error(f"Error fetching Polygon options chain: {e}")
+            return None
+            
+    async def _get_polygon_greeks_snapshot(self, symbol: str) -> Optional[Dict[str, Dict]]:
+        """Get current Greeks from Polygon snapshot"""
+        try:
+            snapshot = await self.polygon_fetcher.get_option_snapshot(symbol)
+            if not snapshot:
+                return None
+                
+            greeks_data = {}
+            for ticker, data in snapshot.items():
+                if data.get('delta') is not None:
+                    greeks_data[ticker] = {
+                        'delta': data['delta'],
+                        'gamma': data.get('gamma'),
+                        'theta': data.get('theta'),
+                        'vega': data.get('vega'),
+                        'implied_volatility': data.get('implied_volatility', 0.25)
+                    }
+                    
+            return greeks_data if greeks_data else None
+            
+        except Exception as e:
+            logger.error(f"Error fetching Polygon Greeks snapshot: {e}")
+            return None
+            
+    async def _get_tastytrade_iv_rank(self, symbol: str, date: datetime) -> Optional[float]:
+        """Get real IV rank from TastyTrade"""
+        try:
+            iv_rank = await self.tastytrade_fetcher.get_iv_rank(symbol, date)
+            return iv_rank
+        except Exception as e:
+            logger.error(f"Error fetching TastyTrade IV rank: {e}")
+            return None
