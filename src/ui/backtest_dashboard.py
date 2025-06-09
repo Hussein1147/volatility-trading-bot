@@ -131,7 +131,7 @@ async def run_backtest_async(config: BacktestConfig, progress_container, log_con
     contracts_by_tier = st.session_state.get('contracts_by_tier', [0.4, 0.4, 0.2])
     force_exit_days = st.session_state.get('force_exit_days', 21)
     
-    # Create engine with AI-powered decisions (Claude Sonnet 4)
+    # Create engine with AI-powered decisions
     engine = BacktestEngine(
         config,
         progress_callback=progress_callback,
@@ -187,7 +187,15 @@ async def run_backtest_async(config: BacktestConfig, progress_container, log_con
 
 def main():
     st.title("📊 Volatility Trading Backtest")
-    st.markdown("Simple dashboard with real-time activity logging")
+    
+    # Show which AI provider is being used
+    try:
+        from src.backtest.ai_provider import create_ai_provider
+        ai_provider = create_ai_provider()
+        ai_model = ai_provider.get_model_name()
+        st.markdown(f"Simple dashboard with real-time activity logging • Using **{ai_model}** for AI analysis")
+    except:
+        st.markdown("Simple dashboard with real-time activity logging")
     
     # Sidebar configuration
     with st.sidebar:
@@ -202,7 +210,7 @@ def main():
             - Min Price Move: 0.3%
             - Min IV Rank: 30
             
-            **Watch the activity log** for real-time Claude AI analysis!
+            **Watch the activity log** for real-time AI analysis!
             """)
         
         # Date range
@@ -695,7 +703,7 @@ def main():
             analyses = backtest_db.get_run_analyses(selected_run_id)
             
             # Tabs for detailed analysis
-            analysis_tab1, analysis_tab2, analysis_tab3 = st.tabs(["Trades", "Claude Analyses", "Confidence Analysis"])
+            analysis_tab1, analysis_tab2, analysis_tab3 = st.tabs(["Trades", "AI Analyses", "Confidence Analysis"])
             
             with analysis_tab1:
                 st.subheader("📈 Trade Details")
@@ -722,7 +730,7 @@ def main():
                     st.info("No trades found for this run")
             
             with analysis_tab2:
-                st.subheader("🤖 Claude's Analyses")
+                st.subheader("🤖 AI Analyses")
                 if analyses:
                     # Filter for actual trade signals
                     trade_analyses = [a for a in analyses if a['should_trade']]

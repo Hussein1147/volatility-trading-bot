@@ -91,9 +91,10 @@ class GeminiProvider(AIProvider):
         
         # Try different models in order of preference
         model_preference = [
-            'gemini-2.5-pro-preview-06-05',  # Latest 2.5 Pro (paid only)
-            'gemini-2.0-flash',               # Latest 2.0 Flash (free tier)
-            'gemini-1.5-flash-latest',        # Fallback to 1.5 Flash
+            'gemini-2.5-pro-preview-06-05',     # Latest 2.5 Pro (best quality, may hit rate limits)
+            'gemini-2.5-flash-preview-05-20',   # 2.5 Flash (faster, higher rate limits)
+            'gemini-2.0-flash',                 # 2.0 Flash (good balance)
+            'gemini-1.5-flash-latest',          # 1.5 Flash (fallback)
         ]
         
         self.model = None
@@ -107,7 +108,11 @@ class GeminiProvider(AIProvider):
                 self.model_name = self._get_display_name(model_name)
                 break
             except Exception as e:
-                logger.debug(f"Model {model_name} not available: {str(e)[:50]}...")
+                error_msg = str(e)
+                if "rate limit" in error_msg.lower() or "quota" in error_msg.lower():
+                    logger.warning(f"Model {model_name} rate limit reached, trying next model...")
+                else:
+                    logger.debug(f"Model {model_name} not available: {error_msg[:100]}...")
                 continue
                 
         if not self.model:
@@ -162,8 +167,10 @@ class GeminiProvider(AIProvider):
         """Get display name for the model"""
         display_names = {
             'gemini-2.5-pro-preview-06-05': 'Gemini 2.5 Pro',
+            'gemini-2.5-flash-preview-05-20': 'Gemini 2.5 Flash',
             'gemini-2.0-flash': 'Gemini 2.0 Flash',
-            'gemini-1.5-flash-latest': 'Gemini 1.5 Flash'
+            'gemini-1.5-flash-latest': 'Gemini 1.5 Flash',
+            'gemini-1.5-flash': 'Gemini 1.5 Flash'
         }
         return display_names.get(model_name, model_name)
     
