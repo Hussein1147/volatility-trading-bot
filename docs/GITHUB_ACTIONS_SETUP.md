@@ -18,13 +18,13 @@ You need to add the following secrets to your GitHub repository:
 - `ALPACA_API_KEY` - Your Alpaca API key
 - `ALPACA_SECRET_KEY` - Your Alpaca secret key
 - `POLYGON_API_KEY` - Your Polygon.io API key (if you have one)
-- `GEMINI_API_KEY` - Your Google Gemini API key
+- `GOOGLE_API_KEY` - Your Google API key (for Gemini)
 - `ANTHROPIC_API_KEY` - Your Anthropic API key
 
 ### How to find your API keys:
 - **Alpaca**: https://app.alpaca.markets/paper/dashboard/overview (click "View" under API Keys)
 - **Polygon**: https://polygon.io/dashboard/api-keys
-- **Gemini**: https://makersuite.google.com/app/apikey
+- **Google**: https://makersuite.google.com/app/apikey or https://console.cloud.google.com/apis/credentials
 - **Anthropic**: https://console.anthropic.com/settings/keys
 
 ## Workflow Schedule
