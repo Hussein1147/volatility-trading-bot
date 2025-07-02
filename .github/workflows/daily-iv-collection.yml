@@ -1,0 +1,52 @@
+name: Daily IV Collection
+
+on:
+  schedule:
+    # Runs at 6:30 PM ET (10:30 PM UTC during EDT, 11:30 PM UTC during EST)
+    # Using 22:30 UTC which is 6:30 PM ET during EDT (summer)
+    - cron: '30 22 * * 1-5'
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  collect-iv:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run daily IV collector
+      env:
+        ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+        ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      run: |
+        python scripts/daily_iv_collector.py
+    
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: daily-iv-logs
+        path: logs/daily_iv_collector.log
+        retention-days: 30
