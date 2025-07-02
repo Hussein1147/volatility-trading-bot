@@ -6,16 +6,22 @@ on:
     # Using 22:30 UTC which is 6:30 PM ET during EDT (summer)
     - cron: '30 22 * * 1-5'
   workflow_dispatch: # Allows manual triggering
+  push:
+    branches:
+      - feature/performance-tuning
+      - main
 
 jobs:
   collect-iv:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        token: ${{ secrets.GITHUB_ACCESS_TOKEN }}
+        token: ${{ secrets.GIT_ACCESS_TOKEN }}
     
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -35,22 +41,30 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     
+    - name: Get current date
+      id: date
+      run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+    
+    - name: Create logs directory
+      run: mkdir -p logs
+    
     - name: Run daily IV collector
       env:
         ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
         ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
         POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       run: |
         python scripts/daily_iv_collector.py
     
     - name: Commit and push database changes
-      run: |
-        git config --global user.name 'GitHub Actions'
-        git config --global user.email 'actions@github.com'
-        git add historical_iv.db
-        git diff --staged --quiet || (git commit -m "Update IV data - $(date '+%Y-%m-%d')" && git push)
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "Update IV data - ${{ steps.date.outputs.date }}"
+        file_pattern: historical_iv.db
+        commit_user_name: GitHub Actions
+        commit_user_email: actions@github.com
     
     - name: Upload logs
       if: always()

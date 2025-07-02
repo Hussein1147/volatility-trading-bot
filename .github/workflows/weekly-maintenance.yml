@@ -22,11 +22,15 @@ on:
 jobs:
   backfill-missing-data:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: github.event_name == 'schedule' && github.event.schedule == '0 14 * * 0' || github.event.inputs.task == 'backfill' || github.event.inputs.task == 'both'
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GIT_ACCESS_TOKEN }}
     
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -46,12 +50,15 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     
+    - name: Create logs directory
+      run: mkdir -p logs
+    
     - name: Run backfill script
       env:
         ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
         ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
         POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       run: |
         python scripts/backfill_missing_iv_data.py
@@ -66,12 +73,16 @@ jobs:
 
   recalculate-iv-ranks:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: github.event_name == 'schedule' && github.event.schedule == '0 15 * * 0' || github.event.inputs.task == 'recalculate' || github.event.inputs.task == 'both'
     needs: [backfill-missing-data]
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GIT_ACCESS_TOKEN }}
     
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -91,12 +102,15 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     
+    - name: Create logs directory
+      run: mkdir -p logs
+    
     - name: Run IV rank recalculation
       env:
         ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
         ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
         POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       run: |
         python scripts/fix_iv_rank_calculations.py
