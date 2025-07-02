@@ -14,12 +14,12 @@ on:
 jobs:
   collect-iv:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GIT_ACCESS_TOKEN }}
     
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -63,8 +63,6 @@ jobs:
         file_pattern: historical_iv.db
         commit_user_name: GitHub Actions
         commit_user_email: actions@github.com
-      env:
-        GITHUB_TOKEN: ${{ secrets.GIT_ACCESS_TOKEN }}
     
     - name: Upload logs
       if: always()
