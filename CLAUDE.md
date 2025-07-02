@@ -1,5 +1,12 @@
 # Volatility Trading Bot - Claude Instructions
 
+## ⚠️ IMPORTANT: Before Starting Work
+**ALWAYS sync the IV database before starting any work:**
+```bash
+python scripts/sync_iv_database.py
+```
+This prevents merge conflicts with GitHub Actions that update the database in the cloud.
+
 ## Project Overview
 This is a volatility trading bot that trades credit spreads on major ETFs when volatility spikes occur. The bot uses Claude AI for trade analysis and decision making.
 
@@ -55,10 +62,12 @@ nohup python3 -m streamlit run src/ui/backtest_dashboard.py --server.port 8502 &
 - `ALPACA_BASE_URL` (use paper trading URL for testing)
 
 ## Development Notes
+- **ALWAYS run `python scripts/sync_iv_database.py` before starting work**
 - Always test changes before committing
 - Use paper trading for development
 - Monitor API rate limits during testing
 - Check dashboard logs for errors
+- If database conflicts occur, use: `git pull --strategy-option=theirs origin main`
 
 ## Claude Integration Requirements
 

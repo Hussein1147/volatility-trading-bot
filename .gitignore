@@ -76,6 +76,7 @@ performance_data/
 # Data files
 *.db
 !historical_iv.db  # Keep this for GitHub Actions to update
+historical_iv_local.db  # Always ignore local development database
 data/exports/*.csv
 data/experiments/*.csv
 # Keep historical IV data
